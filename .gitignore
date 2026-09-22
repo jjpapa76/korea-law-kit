@@ -1,0 +1,9 @@
+# 캐시는 각자 것이다. 남의 것을 받아 쓸 이유가 없다.
+law_kit/.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# 내부용 인수인계 - 경로·사용자명·사내 프로젝트 이름이 들어 있다. 공개하지 않는다.
+HANDOVER.local.md
