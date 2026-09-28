@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "korea-law-kit"
+version = "1.0.0"
+description = "어떤 법이든 토큰 0으로 - 국가법령정보 공동활용 OPEN API 파이썬 꾸러미"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+korea-law-mcp = "law_kit.mcp_server:main"
+
+[tool.setuptools]
+packages = ["law_kit"]
+
+[tool.setuptools.package-data]
+law_kit = ["law_api_catalog.json"]
+
+[tool.setuptools.exclude-package-data]
+law_kit = [".cache", ".cache/*", ".cache/**/*"]

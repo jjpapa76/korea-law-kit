@@ -31,15 +31,34 @@ SEARCH_URL = "https://www.law.go.kr/DRF/lawSearch.do"
 SERVICE_URL = "https://www.law.go.kr/DRF/lawService.do"
 BASE = "https://www.law.go.kr"
 
+def setting(name):
+    """환경변수 하나. 프로세스 환경에 없으면 Windows 사용자 환경변수를 본다.
+
+    MCP 클라이언트는 서버를 띄울 때 환경을 걸러 넘긴다(codex 는 부모
+    환경을 아예 안 넘긴다). 그러면 사용자가 키를 설정해 두어도 서버는
+    못 보고 데모 키로 조용히 떨어진다. 키를 클라이언트 설정 파일마다
+    복사해 두면 키가 여섯 군데로 흩어진다 - 한 곳(HKCU\\Environment)에만
+    두고 여기서 직접 읽는다.
+    """
+    value = os.environ.get(name)
+    if value or os.name != "nt":
+        return value
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return winreg.QueryValueEx(key, name)[0] or None
+    except OSError:
+        return None
+
+
 #: 요청 사이 간격(초). 남의 서버다.
 DELAY = 0.2
 #: 캐시 기본 수명(초). 법령은 자주 안 바뀐다.
 CACHE_TTL = 7 * 24 * 3600
 #: 캐시 위치. 환경변수로 옮길 수 있게 둔다 - 여러 프로그램이 **같은 곳**을
 #: 봐야 공유가 된다.
-CACHE_DIR = os.environ.get(
-    "LAW_KIT_CACHE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache"))
+CACHE_DIR = setting("LAW_KIT_CACHE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".cache")
 _UA = "law-kit/1.0"
 #: 법제처는 Referer 없는 요청을 거부하기도 한다.
 _REFERER = BASE
@@ -147,8 +166,8 @@ def oc():
     조용히 적게 나오는 것이 가장 헷갈리므로 `is_demo_key()` 로 확인할 수
     있게 해 둔다.
     """
-    return (os.environ.get("LAW_API_OC")
-            or os.environ.get("NATIONAL_LAW_API_OC")
+    return (setting("LAW_API_OC")
+            or setting("NATIONAL_LAW_API_OC")
             or DEMO_OC)
 
 
@@ -308,6 +327,18 @@ def call(target, service=False, ttl=CACHE_TTL, **params):
         return Result(target, ok=True, complete=False, cached=cached,
                       total=total,
                       error="응답을 알아보지 못했다 - 0건인지 알 수 없다")
+    # 한 번 부른 목록조회는 display 만큼만 온다. 총건수가 더 크면 앞부분이다 -
+    # 그걸 완전하다고 하면 "257건 중 20건" 이 "20건이 전부" 가 된다(레드팀 재현).
+    # call_all 은 페이지마다 ok 와 partial 만 보므로 이 표시에 흔들리지 않는다.
+    try:
+        expected = int(total)
+    except (TypeError, ValueError):
+        expected = None
+    if not service and expected is not None and expected > len(items):
+        return Result(target, items=items, total=total, cached=cached,
+                      complete=False, truncated=True,
+                      error="총 %d건 중 %d건만 받았다 - 전수는 call_all"
+                            % (expected, len(items)))
     return Result(target, items=items, total=total, cached=cached)
 
 

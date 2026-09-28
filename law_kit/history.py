@@ -103,20 +103,42 @@ def successor(name):
         return {"name": name, "status": "현행", "why": why, "candidates": []}
     old = versions(name)
     rows = old.partial("versions") or []
+    if not dict.get(old, "complete", True):
+        # 연혁을 끝까지 못 봤으면 rows[0] 이 마지막 판이라는 보장이 없다.
+        return {"name": name, "status": "미확인", "complete": False,
+                "why": "연혁을 끝까지 보지 못했다 - %s" % old.why(),
+                "candidates": []}
     if not rows:
         return {"name": name, "status": "미확인", "why": "연혁을 못 찾았다",
                 "candidates": []}
     last = rows[0]
-    body = client.call("eflaw", service=True, MST=last["MST"])
+    # MST 로 부를 때는 efYd(시행일자)가 필수다. 빠뜨리면 HTML 이 오고,
+    # 그 실패가 "후보 0개" 로 보였다(도시계획법 실측 2026-09-24).
+    body = client.call("eflaw", service=True, MST=last["MST"],
+                       efYd=last.get("시행일자", ""))
+    if not body.ok or not body.complete:
+        return {"name": name, "status": "구법", "why": why,
+                "last_version": last, "candidates": [],
+                "complete": False,
+                "note": "마지막 판 본문을 못 받아 후보를 못 뽑았다 - %s"
+                        % (body.error or "끝까지 받지 못했다")}
+    import json as _json
+    import re
+    blob = _json.dumps(body.partial, ensure_ascii=False)
     hints = []
-    if body.ok:
-        import json as _json
-        blob = _json.dumps(body.partial, ensure_ascii=False)
-        import re
-        for match in re.finditer(r"「([^」]{4,40}?(?:법|법률))」", blob):
+    # 타법폐지면 폐지한 법의 이름이 「」 없이 부칙 머리에 붙어 온다:
+    # "부칙(국토의계획및이용에관한법률) <제6655호,2002.2.4>"
+    for pattern in (r"부칙\(([^)]{2,40}?(?:법|법률))\)",
+                    r"「([^」]{4,40}?(?:법|법률))」"):
+        for match in re.finditer(pattern, blob):
             title = match.group(1)
             if title != name and title not in hints:
                 hints.append(title)
+    if not hints:
+        # 후보를 못 뽑은 것은 "뒤를 이은 법이 없다" 가 아니다.
+        return {"name": name, "status": "구법", "why": why,
+                "last_version": last, "candidates": [], "complete": False,
+                "note": "본문에서 승계 후보를 찾지 못했다 - 없다는 뜻이 아니다"}
     return {"name": name, "status": "구법", "why": why,
             "last_version": last,
             "candidates": hints[:10],

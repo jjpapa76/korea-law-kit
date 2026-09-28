@@ -728,3 +728,96 @@ def test_incomplete_history_is_unknown_not_absent(monkeypatch):
         "eflaw", ok=True, items=[], total=900, truncated=True, complete=False))
     alive, why = history.is_current("어떤법")
     assert alive is None and "미확인" in why
+
+
+def test_setting_prefers_process_env_then_user_registry(monkeypatch):
+    """키는 한 곳(사용자 환경변수)에만 둔다. 클라이언트가 환경을 걸러도 읽혀야 한다."""
+    from law_kit import client
+    monkeypatch.setenv("LAW_KIT_TEST_SETTING", "from-env")
+    assert client.setting("LAW_KIT_TEST_SETTING") == "from-env"
+    monkeypatch.delenv("LAW_KIT_TEST_SETTING")
+    assert client.setting("LAW_KIT_TEST_SETTING") is None
+
+
+def _old_law(monkeypatch, body):
+    monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
+    monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
+        "complete": True, "versions": [{"MST": "57195", "시행일자": "20030101"}]}))
+    seen = {}
+
+    def fake_call(target, service=False, **params):
+        seen.update(params)
+        return body
+    monkeypatch.setattr(client, "call", fake_call)
+    return seen
+
+
+def test_successor_sends_efyd_and_reads_the_abolishing_law(monkeypatch):
+    """MST 본문조회는 efYd 가 필수다. 타법폐지면 승계법 이름은 부칙 머리에 온다."""
+    body = client.Result("eflaw", items=[{"부칙": {"부칙내용": [
+        ["부칙(국토의계획및이용에관한법률) <제6655호,2002.2.4>"]]}}], total=1)
+    seen = _old_law(monkeypatch, body)
+    found = history.successor("도시계획법")
+    assert seen.get("efYd") == "20030101"
+    assert found["candidates"] == ["국토의계획및이용에관한법률"]
+
+
+def test_successor_body_failure_is_not_zero_candidates(monkeypatch):
+    _old_law(monkeypatch, client.Result("eflaw", ok=False, error="HTML 응답"))
+    found = history.successor("도시계획법")
+    assert found["complete"] is False and "HTML 응답" in found["note"]
+
+
+def test_successor_without_hints_is_unknown(monkeypatch):
+    _old_law(monkeypatch, client.Result("eflaw", items=[{"조문": "폐지한다"}], total=1))
+    assert history.successor("도시계획법")["complete"] is False
+
+
+def test_single_call_below_total_is_not_complete(monkeypatch):
+    import json
+    """한 번 부른 목록이 총건수보다 적으면 앞부분이다 - law_call 이 그대로 노출한다."""
+    body = json.dumps({"LawSearch": {"totalCnt": "257", "law": [{"법령명한글": "가"}] * 20}})
+    monkeypatch.setattr(client, "raw", lambda url, q, ttl=0: (body, False))
+    result = client.call("law", query="의료폐기물", display=20)
+    assert result.ok and not result.complete and result.truncated
+    assert "257" in result.why_incomplete()
+
+
+def test_successor_with_cut_body_or_history_is_unknown(monkeypatch):
+    cut = client.Result("eflaw", items=[{"x": "「국토계획법」"}], total=1,
+                        complete=False, truncated=True)
+    _old_law(monkeypatch, cut)
+    assert history.successor("도시계획법")["complete"] is False
+    monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
+        "complete": False, "note": "3페이지에서 끊김",
+        "versions": [{"MST": "1", "시행일자": "20000101"}]}))
+    found = history.successor("도시계획법")
+    assert found["status"] == "미확인" and found["complete"] is False
+
+
+def test_setting_reads_the_user_registry_when_env_is_filtered(monkeypatch):
+    """MCP 클라이언트가 환경을 걸러도 사용자 환경변수(HKCU\Environment)는 읽힌다."""
+    import sys
+    import types
+    fake = types.SimpleNamespace(
+        HKEY_CURRENT_USER=object(),
+        OpenKey=lambda root, sub: __import__("contextlib").nullcontext(sub),
+        QueryValueEx=lambda key, name: ("from-registry", 1))
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    monkeypatch.setattr(client.os, "name", "nt")
+    monkeypatch.delenv("LAW_KIT_TEST_REG", raising=False)
+    assert client.setting("LAW_KIT_TEST_REG") == "from-registry"
+
+
+def test_paging_to_the_end_is_complete_despite_partial_pages(monkeypatch):
+    """페이지마다 call 은 '앞부분' 이지만, 끝까지 넘긴 call_all 은 완전해야 한다."""
+    import json
+    pages = {1: 100, 2: 100, 3: 50}
+
+    def fake_raw(url, q, ttl=0):
+        n = pages[int(q["page"])]
+        rows = [{"법령명한글": "p%s-%d" % (q["page"], i)} for i in range(n)]
+        return json.dumps({"LawSearch": {"totalCnt": "250", "law": rows}}), True
+    monkeypatch.setattr(client, "raw", fake_raw)
+    result = client.call_all("law", query="x", page_size=100)
+    assert result.complete and len(result.items) == 250

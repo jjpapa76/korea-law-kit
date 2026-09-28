@@ -8,6 +8,7 @@ import json
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import law_kit as kit                          # noqa: E402
 
@@ -26,6 +27,9 @@ USAGE = """python -m law_kit <명령> <말>
 
 
 def main(argv):
+    if kit.client.is_demo_key():
+        sys.stderr.write("경고: 인증키 없이 데모 키(test)로 불렀다. 결과가 제한됐을 수 있다. LAW_API_OC 를 설정하라\n")
+        sys.stderr.flush()
     if not argv:
         print(USAGE)
         return 0

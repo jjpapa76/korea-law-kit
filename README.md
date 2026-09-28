@@ -35,8 +35,35 @@ python -m law_kit tree 주차장법
 python -m law_kit find 국토계획법
 ```
 
-인증키는 `LAW_API_OC` 환경변수로 준다. 없으면 저장소 기본값을 찾고,
-그것도 없으면 `test` 로 떨어진다(결과가 제한된다).
+## MCP 서버 — Claude·codex·Gemini/Antigravity 어디서든
+
+표준 라이브러리만 쓰는 stdio MCP 서버가 들어 있다. 설치 없이 파일 경로 하나로 붙는다.
+
+```
+python D:\...\korea-law-kit\korea_law_mcp.py
+```
+
+| 도구 | 하는 일 |
+|---|---|
+| `law_brief` | 주제 한 번에 훑기 (요약문 + 못 본 것) |
+| `law_find` | 법 이름 → ID·MST |
+| `law_term` | 낱말 → 조문 |
+| `law_tree` | 법률 → 하위법령 건수·이름 (`group`·`contains` 로 행) |
+| `law_annex` | 별표·서식 목록 |
+| `law_history` | 현행/구법 + 승계 후보 |
+| `law_search` | 8개 축 |
+| `law_api` | 설명서 195건 검색 |
+| `law_call` | 아무 target 직접 |
+
+결과가 조금이라도 불완전하면 — 어느 깊이에 있든, 응답이 60,000자에서
+잘렸든 — 최상위에 `"complete": false`, `why`, `지시` 가 붙고 받은 만큼은
+`partial` 에 들어간다. 모델에게 "없다고 답하지 마라" 를 문장으로 돌려준다.
+
+인증키는 `LAW_API_OC` 환경변수로 준다(옛 이름 `NATIONAL_LAW_API_OC` 도
+읽는다). 프로세스 환경에 없으면 Windows 사용자 환경변수(레지스트리)를
+직접 읽는다 - MCP 클라이언트가 환경을 걸러 넘겨도(codex 는 아예 안 넘긴다)
+키를 한 곳에만 두면 된다. 둘 다 없으면 `test` 로 떨어지고 결과가 제한된다 -
+`law_kit.client.is_demo_key()` 로 확인할 수 있고, MCP 응답에는 `경고` 가 붙는다.
 
 ## 지키는 것 셋
 
@@ -73,7 +100,7 @@ law_kit.search.all_pages("law", "의료폐기물", search_mode=2)   # 257/257, c
 같은 법을 각각 받으면 하루 한도를 그만큼 더 쓴다. `LAW_KIT_CACHE` 를 같은
 곳으로 맞추면 두 번째부터는 호출이 0이다.
 
-실측(2026-09-22, 낱말 5개): 처음 4.08초 → 두 번째 **0.007초 (573배)**,
+실측(2026-09-22, 낱말 5개): 처음 4.08초 → 두 번째 **0.007초 (약 580배)**,
 API 호출 0회.
 
 ## 무엇이 어디에 있나
@@ -122,7 +149,7 @@ API 호출 0회.
 ## 시험
 
 ```
-python -m pytest        # 67건. 망에 나가지 않는다
+python -m pytest        # 93건. 망에 나가지 않는다
 ```
 
 시험은 대부분 "잘 찾는가" 가 아니라 **"못 찾았을 때 못 찾았다고 하는가"**
