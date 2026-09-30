@@ -358,6 +358,7 @@ def install(py=None, apply=False):
     # (5) OpenClaude
     openclaude_bin = find_executable(["openclaude.cmd", "openclaude.exe", "openclaude"])
     if openclaude_bin:
+        run_command("openclaude", [openclaude_bin, "mcp", "remove", "-s", "user", NAME], dry=dry)
         run_command("openclaude", [openclaude_bin, "mcp", "add", "-s", "user", NAME, "--"] + cmd_args, dry=dry)
     else:
         say("%-14s CLI 없음 - 건너뜀" % "openclaude")
@@ -365,6 +366,7 @@ def install(py=None, apply=False):
     # (6) Copilot CLI
     copilot_bin = find_executable(["copilot.cmd", "copilot.exe", "copilot"])
     if copilot_bin:
+        run_command("copilot", [copilot_bin, "mcp", "remove", NAME], dry=dry)
         run_command("copilot", [copilot_bin, "mcp", "add", NAME, "--"] + cmd_args, dry=dry)
     else:
         say("%-14s CLI 없음 - 건너뜀" % "copilot")
@@ -372,6 +374,7 @@ def install(py=None, apply=False):
     # (7) Kiro CLI
     kiro_bin = find_executable(["kiro-cli.exe", "kiro.cmd", "kiro"])
     if kiro_bin:
+        run_command("kiro", [kiro_bin, "mcp", "remove", "--name", NAME, "--scope", "global"], dry=dry)
         run_command("kiro", [kiro_bin, "mcp", "add", "--name", NAME, "--scope", "global",
                              "--command", py, "--args", LAUNCHER], dry=dry)
     else:

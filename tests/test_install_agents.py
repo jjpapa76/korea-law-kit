@@ -778,4 +778,91 @@ def test_yaml_blank_lines_and_comments_in_block(tmp_path, monkeypatch):
     assert "  web_search: true\n" in result_text
 
 
+def test_openclaude_copilot_kiro_remove_then_add(tmp_path, monkeypatch, capsys):
+    """openclaude, copilot, kiro 가 remove -> add 순서로 호출되고 remove 실패가 전체 실패로 이어지지 않아야 한다."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
 
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    openclaude_path = str(bin_dir / "openclaude.cmd")
+    copilot_path = str(bin_dir / "copilot.cmd")
+    kiro_path = str(bin_dir / "kiro-cli.exe")
+    (bin_dir / "openclaude.cmd").write_text("", encoding="utf-8")
+    (bin_dir / "copilot.cmd").write_text("", encoding="utf-8")
+    (bin_dir / "kiro-cli.exe").write_text("", encoding="utf-8")
+
+    fake_bins = {
+        "openclaude.cmd": openclaude_path,
+        "copilot.cmd": copilot_path,
+        "kiro-cli.exe": kiro_path,
+    }
+
+    def fake_which(name):
+        return fake_bins.get(name)
+
+    monkeypatch.setattr("shutil.which", fake_which)
+
+    executed_calls = []
+
+    class MockResult:
+        def __init__(self, code, out=b"", err=b""):
+            self.returncode = code
+            self.stdout = out
+            self.stderr = err
+
+    def mock_run(cmd, *args, **kwargs):
+        executed_calls.append(list(cmd))
+        if "remove" in cmd:
+            return MockResult(1, b"", b"server korea-law not found")
+        return MockResult(0, b"server korea-law added successfully", b"")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    # 1. apply 모드 실행
+    ret = install_agents.install(py="python.exe", apply=True)
+    assert ret == 0, f"install() 반환코드가 0이 아님: {ret}"
+
+    # 각 CLI 별 remove / add 호출 확인
+    openclaude_remove = [openclaude_path, "mcp", "remove", "-s", "user", "korea-law"]
+    openclaude_add = [openclaude_path, "mcp", "add", "-s", "user", "korea-law", "--", "python.exe", install_agents.LAUNCHER]
+
+    copilot_remove = [copilot_path, "mcp", "remove", "korea-law"]
+    copilot_add = [copilot_path, "mcp", "add", "korea-law", "--", "python.exe", install_agents.LAUNCHER]
+
+    kiro_remove = [kiro_path, "mcp", "remove", "--name", "korea-law", "--scope", "global"]
+    kiro_add = [
+        kiro_path, "mcp", "add", "--name", "korea-law", "--scope", "global",
+        "--command", "python.exe", "--args", install_agents.LAUNCHER
+    ]
+
+    assert openclaude_remove in executed_calls, f"openclaude remove 가 호출되지 않음: {executed_calls}"
+    assert openclaude_add in executed_calls, f"openclaude add 가 호출되지 않음: {executed_calls}"
+    assert executed_calls.index(openclaude_remove) < executed_calls.index(openclaude_add), "openclaude remove 가 add 보다 나중에 호출됨"
+
+    assert copilot_remove in executed_calls, f"copilot remove 가 호출되지 않음: {executed_calls}"
+    assert copilot_add in executed_calls, f"copilot add 가 호출되지 않음: {executed_calls}"
+    assert executed_calls.index(copilot_remove) < executed_calls.index(copilot_add), "copilot remove 가 add 보다 나중에 호출됨"
+
+    assert kiro_remove in executed_calls, f"kiro remove 가 호출되지 않음: {executed_calls}"
+    assert kiro_add in executed_calls, f"kiro add 가 호출되지 않음: {executed_calls}"
+    assert executed_calls.index(kiro_remove) < executed_calls.index(kiro_add), "kiro remove 가 add 보다 나중에 호출됨"
+
+    captured = capsys.readouterr().out
+    assert "모든 에이전트 등록이 완료되었습니다." in captured
+
+    # 2. dry-run 모드 검증
+    ret_dry = install_agents.install(py="python.exe", apply=False)
+    assert ret_dry == 0
+    dry_out = capsys.readouterr().out
+    assert f"[dry] openclaude     실행 예정 -> {openclaude_path} mcp remove -s user korea-law" in dry_out
+    assert f"[dry] openclaude     실행 예정 -> {openclaude_path} mcp add -s user korea-law -- python.exe" in dry_out
+    assert f"[dry] copilot        실행 예정 -> {copilot_path} mcp remove korea-law" in dry_out
+    assert f"[dry] copilot        실행 예정 -> {copilot_path} mcp add korea-law -- python.exe" in dry_out
+    assert f"[dry] kiro           실행 예정 -> {kiro_path} mcp remove --name korea-law --scope global" in dry_out
+    assert f"[dry] kiro           실행 예정 -> {kiro_path} mcp add --name korea-law --scope global --command python.exe --args" in dry_out
