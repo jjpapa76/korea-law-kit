@@ -124,6 +124,52 @@ def test_page_cap_is_reported_as_truncation(monkeypatch):
     assert result.truncated and not result.complete
 
 
+def test_cache_dir_default_is_user_home_cache(monkeypatch, tmp_path):
+    """LAW_KIT_CACHE 가 없을 때 기본값은 사용자 홈의 .cache/korea-law-kit 이다."""
+    import importlib
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.delenv("LAW_KIT_CACHE", raising=False)
+    if sys.platform == "win32":
+        try:
+            import winreg
+            orig_query = winreg.QueryValueEx
+
+            def fake_query(key, name):
+                if name == "LAW_KIT_CACHE":
+                    raise FileNotFoundError()
+                return orig_query(key, name)
+
+            monkeypatch.setattr(winreg, "QueryValueEx", fake_query)
+        except ImportError:
+            pass
+    importlib.reload(client)
+    try:
+        expected = os.path.normpath(os.path.expanduser(
+            os.path.join("~", ".cache", "korea-law-kit")))
+        assert os.path.normpath(client.CACHE_DIR) == expected
+        assert os.path.normpath(client.CACHE_DIR) == os.path.normpath(
+            str(fake_home / ".cache" / "korea-law-kit"))
+    finally:
+        importlib.reload(client)
+        importlib.reload(laws)
+
+
+def test_cache_dir_honors_law_kit_cache_setting(monkeypatch, tmp_path):
+    """LAW_KIT_CACHE 가 있으면 그 경로를 우선한다."""
+    import importlib
+    custom_dir = str(tmp_path / "custom_cache")
+    monkeypatch.setenv("LAW_KIT_CACHE", custom_dir)
+    importlib.reload(client)
+    try:
+        assert client.CACHE_DIR == custom_dir
+    finally:
+        importlib.reload(client)
+        importlib.reload(laws)
+
+
 # ---------------------------------------------------------------- search
 
 def test_display_cap_is_not_reported_as_complete(monkeypatch):

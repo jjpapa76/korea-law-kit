@@ -57,8 +57,10 @@ DELAY = 0.2
 CACHE_TTL = 7 * 24 * 3600
 #: 캐시 위치. 환경변수로 옮길 수 있게 둔다 - 여러 프로그램이 **같은 곳**을
 #: 봐야 공유가 된다.
-CACHE_DIR = setting("LAW_KIT_CACHE") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".cache")
+#: 여러 에이전트가 따로 띄워도 같은 캐시를 보게 하려고.
+#: 설치 때 OS 환경변수를 바꾸지 않아도 되게.
+CACHE_DIR = setting("LAW_KIT_CACHE") or os.path.expanduser(
+    os.path.join("~", ".cache", "korea-law-kit"))
 _UA = "law-kit/1.0"
 #: 법제처는 Referer 없는 요청을 거부하기도 한다.
 _REFERER = BASE

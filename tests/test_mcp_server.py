@@ -448,3 +448,595 @@ def test_tree_summary_still_reports_nested_incomplete(monkeypatch):
 def test_huge_reason_cannot_push_the_reply_over_the_cap():
     text = mcp_server.serialize_response({"complete": False, "why": "가" * 100000, "items": []})
     assert len(text) <= mcp_server.MAX_TEXT_LENGTH
+
+
+def test_law_term_summary_stays_under_60000_with_huge_result(monkeypatch):
+    """원래 14만 자가 넘는 대형 결과도 요약 모드(기본)에서는 본문을 빼서 60,000자 상한 안에 든다."""
+    # 100개 조문, 각 조문내용 1,400자 -> 통째로는 15만 자 이상
+    fake_articles = []
+    for i in range(100):
+        fake_articles.append({
+            "법령명": "국토의 계획 및 이용에 관한 법률",
+            "조": "제%d조" % (i + 1),
+            "조번호": "%04d" % (i + 1),
+            "조가지번호": "00",
+            "조문내용": "가" * 1400,
+            "용어구분": "법령",
+            "출현횟수": 2,
+        })
+    fake = Answer({
+        "term": "건폐율",
+        "found": True,
+        "complete": True,
+        "terms": [{"용어": "건폐율", "조문수": 100}],
+        "articles": fake_articles,
+        "laws": ["국토의 계획 및 이용에 관한 법률"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    writer = BufferWriter()
+    mcp_server.handle_message({
+        "jsonrpc": "2.0",
+        "id": 901,
+        "method": "tools/call",
+        "params": {"name": "law_term", "arguments": {"term": "건폐율"}}
+    }, writer)
+
+    raw_text = writer.get_json_lines()[0]["result"]["content"][0]["text"]
+    assert len(raw_text) <= mcp_server.MAX_TEXT_LENGTH
+    parsed = json.loads(raw_text)
+    assert parsed["complete"] is True
+    # 본문(조문내용)이 빠져 있는지 확인
+    assert len(parsed["articles"]) == 100
+    assert "조문내용" not in parsed["articles"][0]
+    # 법령별 건수가 제공되는지 확인
+    assert parsed["counts"]["국토의 계획 및 이용에 관한 법률"] == 100
+
+
+def test_law_term_filter_by_law(monkeypatch):
+    """law 인자를 주면 해당 법령명의 조문만 남긴다."""
+    fake_articles = [
+        {"법령명": "건축법", "조": "제1조", "출현횟수": 1, "조문내용": "건축법 제1조"},
+        {"법령명": "주택법", "조": "제2조", "출현횟수": 1, "조문내용": "주택법 제2조"},
+        {"법령명": "건축법시행령", "조": "제3조", "출현횟수": 1, "조문내용": "시행령 제3조"},
+    ]
+    fake = Answer({
+        "term": "건축",
+        "found": True,
+        "complete": True,
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법", "주택법", "건축법시행령"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    # 1. '주택'으로 필터링
+    parsed = _call("law_term", {"term": "건축", "law": "주택"})
+    assert len(parsed["articles"]) == 1
+    assert parsed["articles"][0]["법령명"] == "주택법"
+
+    # 2. '건축법'으로 필터링 (건축법, 건축법시행령 포함)
+    parsed2 = _call("law_term", {"term": "건축", "law": "건축법"})
+    assert len(parsed2["articles"]) == 2
+    assert {r["법령명"] for r in parsed2["articles"]} == {"건축법", "건축법시행령"}
+
+
+def test_law_term_with_text(monkeypatch):
+    """with_text: true 면 조문내용(본문)을 포함하고, false(기본)면 제외한다."""
+    fake_articles = [
+        {"법령명": "건축법", "조": "제1조", "출현횟수": 1, "조문내용": "제1조의 실제 본문 내용"},
+    ]
+    fake = Answer({
+        "term": "건축선",
+        "found": True,
+        "complete": True,
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    # 기본: 본문 없음
+    parsed_no_text = _call("law_term", {"term": "건축선"})
+    assert "조문내용" not in parsed_no_text["articles"][0]
+
+    # with_text: true: 본문 있음
+    parsed_with_text = _call("law_term", {"term": "건축선", "with_text": True})
+    assert parsed_with_text["articles"][0]["조문내용"] == "제1조의 실제 본문 내용"
+
+
+def test_law_term_incomplete_propagation(monkeypatch):
+    """원래 결과가 불완전하면 요약 모드에서도 complete: false 와 사유가 남는다."""
+    fake = Answer({
+        "term": "건폐율",
+        "found": True,
+        "complete": False,
+        "note": "2페이지 조회 중 통신 오류 발생",
+        "terms": [],
+        "articles": [{"법령명": "건축법", "조": "제1조"}],
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    parsed = _call("law_term", {"term": "건폐율"})
+    assert parsed["complete"] is False
+    assert "통신 오류" in parsed["why"]
+    assert "이 결과로 '없다'·'전부다'라고 답하지 마라" in parsed["지시"]
+
+
+# ---------------------------------------------------------------- 10. law_api call 생성
+def test_law_api_call_generation(monkeypatch):
+    """law_api 응답의 각 항목에 law_call 인자 예시(call)가 올바르게 붙는지 확인한다.
+
+    왜 이 시험이 필요한가:
+        law_api 로 찾은 API 를 law_call 로 즉시 호출할 수 있어야 한다.
+        엔드포인트가 lawService 면 service: true, lawSearch 면 service: false 여야 하고,
+        카탈로그 request_params 중 '필수' 가 든 변수에서 공통 헤더(OC·target·type)를
+        제외한 필수 매개변수만 params 에 추출되어야 한다.
+    """
+    fake_entries = [
+        {
+            "name": "현행법령 조회 API",
+            "endpoint": "http://www.law.go.kr/DRF/lawService.do",
+            "target": "eflaw",
+            "request_params": [
+                {"name": "OC", "value": "string(필수)", "desc": "인증키"},
+                {"name": "target", "value": "string : eflaw(필수)", "desc": "서비스 대상"},
+                {"name": "type", "value": "char(필수)", "desc": "출력 형태"},
+                {"name": "efYd", "value": "string(필수)", "desc": "시행일자 범위"},
+                {"name": "query", "value": "string", "desc": "검색어 (선택)"},
+            ]
+        },
+        {
+            "name": "판례 검색 API",
+            "endpoint": "http://www.law.go.kr/DRF/lawSearch.do",
+            "target": "prec",
+            "request_params": [
+                {"name": "OC", "value": "string(필수)", "desc": "인증키"},
+                {"name": "target", "value": "string(필수)", "desc": "서비스 대상"},
+                {"name": "type", "value": "char(필수)", "desc": "출력 형태"},
+                {"name": "query", "value": "string(필수)", "desc": "판례 질의어"},
+                {"name": "display", "value": "int", "desc": "표시 건수 (선택)"},
+            ]
+        },
+        {
+            "name": "법령 목록 검색 API",
+            "endpoint": "http://www.law.go.kr/DRF/lawSearch.do",
+            "target": "law",
+            "request_params": [
+                {"name": "OC", "value": "string(필수)", "desc": "인증키"},
+                {"name": "target", "value": "string(필수)", "desc": "서비스 대상"},
+                {"name": "type", "value": "char(필수)", "desc": "출력 형태"},
+            ]
+        }
+    ]
+
+    # 1. target 지정 조회 시 call 객체 검증
+    monkeypatch.setattr(kit.catalog, "describe", lambda t: [e for e in fake_entries if e["target"] == t])
+    parsed_target = _call("law_api", {"target": "eflaw"})
+    assert len(parsed_target["entries"]) == 1
+    call1 = parsed_target["entries"][0]["call"]
+    assert call1["target"] == "eflaw"
+    assert call1["service"] is True           # lawService.do
+    assert call1["params"] == {}              # 설명문 대신 빈 params
+    assert parsed_target["entries"][0]["required"] == {"efYd": "시행일자 범위"}  # OC, target, type 제외
+
+    # 2. query 키워드 검색 시 call 객체 검증
+    monkeypatch.setattr(kit.catalog, "search", lambda q: fake_entries)
+    parsed_search = _call("law_api", {"query": "검색"})
+    assert len(parsed_search["entries"]) == 3
+
+    # prec: lawSearch -> service: False, 필수: query 만
+    call2 = parsed_search["entries"][1]["call"]
+    assert call2["target"] == "prec"
+    assert call2["service"] is False          # lawSearch.do
+    assert call2["params"] == {}              # 설명문 대신 빈 params
+    assert parsed_search["entries"][1]["required"] == {"query": "판례 질의어"}
+
+    # law: 필수 파라미터가 OC, target, type 외에 없는 경우 빈 params 와 빈 required
+    call3 = parsed_search["entries"][2]["call"]
+    assert call3["target"] == "law"
+    assert call3["service"] is False
+    assert call3["params"] == {}
+    assert parsed_search["entries"][2]["required"] == {}
+
+
+# ---------------------------------------------------------------- 11. law_term 페이징
+def test_law_term_pagination_boundaries_and_total(monkeypatch):
+    """law_term 에 offset 과 limit 을 적용해 결과를 이어 읽고 경계값을 확인한다.
+
+    왜 이 시험이 필요한가:
+        대용량 조문 결과(예: 250건)를 한 번에 주지 않고 200건 단위로 나누어 주며,
+        total 과 next_offset 을 통해 이어 읽을 수 있어야 한다.
+        잘라서 준 것은 불완전(complete: false)이 아니라 정상 페이징(complete: true)이어야 한다.
+    """
+    fake_articles = [{"법령명": "건축법", "조": "제%d조" % i} for i in range(1, 251)]
+    fake = Answer({
+        "term": "건축",
+        "found": True,
+        "complete": True,
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    # 1. 기본 호출 (offset=0, limit=200 기본값): 200건 반환, 다음 offset 200 -> 불완전(complete: false)
+    res1 = _call("law_term", {"term": "건축"})
+    assert res1["complete"] is False
+    assert "offset=200" in res1["why"]
+    assert "전체 250건 중 1~200 번째만 줬다" in res1["why"]
+    assert res1["partial"]["total"] == 250
+    assert len(res1["partial"]["articles"]) == 200
+    assert res1["partial"]["articles"][0]["조"] == "제1조"
+    assert res1["partial"]["articles"][199]["조"] == "제200조"
+    assert res1["partial"]["next_offset"] == 200
+
+    # 2. 다음 페이지 호출 (offset=200, limit=200): 나머지 50건 반환, 전체를 다 담지 못했으므로 complete: false
+    res2 = _call("law_term", {"term": "건축", "offset": 200, "limit": 200})
+    assert res2["complete"] is False
+    assert "전체 250건 중 201~250 번째만 줬다" in res2["why"]
+    assert "앞 1~200번째" in res2["why"]
+    assert res2["partial"]["total"] == 250
+    assert len(res2["partial"]["articles"]) == 50
+    assert res2["partial"]["articles"][0]["조"] == "제201조"
+    assert res2["partial"]["articles"][49]["조"] == "제250조"
+    assert res2["partial"]["next_offset"] is None
+
+    # 3. 경계값: limit 이 전체를 넘는 경우 (offset=0, limit=300) -> 한 번에 다 받음 complete: true
+    res3 = _call("law_term", {"term": "건축", "offset": 0, "limit": 300})
+    assert res3["complete"] is True
+    assert res3["total"] == 250
+    assert len(res3["articles"]) == 250
+    assert res3["next_offset"] is None
+
+    # 4. 경계값: 마지막 바로 앞 (offset=245, limit=5) -> 끝 5건이지만 전체가 아니므로 complete: false
+    res4 = _call("law_term", {"term": "건축", "offset": 245, "limit": 5})
+    assert res4["complete"] is False
+    assert "전체 250건 중 246~250 번째만 줬다" in res4["why"]
+    assert "앞 1~245번째" in res4["why"]
+    assert len(res4["partial"]["articles"]) == 5
+    assert res4["partial"]["next_offset"] is None
+
+    # 5. 경계값: 마지막보다 덜 읽음 (offset=240, limit=5) -> next_offset=245 -> complete: false
+    res5 = _call("law_term", {"term": "건축", "offset": 240, "limit": 5})
+    assert res5["complete"] is False
+    assert "offset=245" in res5["why"]
+    assert res5["partial"]["total"] == 250
+    assert len(res5["partial"]["articles"]) == 5
+    assert res5["partial"]["next_offset"] == 245
+
+    # 6. 경계값: offset 이 total 이상인 경우 (offset=300, limit=200) -> complete: false 및 why 에 전체 건수 초과 알림
+    res6 = _call("law_term", {"term": "건축", "offset": 300, "limit": 200})
+    assert res6["complete"] is False
+    assert "offset 이 전체 건수를 넘었다" in res6["why"]
+    assert res6["partial"]["total"] == 250
+    assert len(res6["partial"]["articles"]) == 0
+    assert res6["partial"]["next_offset"] is None
+
+
+def test_law_term_pagination_preserves_incomplete_on_original_flaw(monkeypatch):
+    """페이징으로 잘라 주더라도 원래 결과가 불완전하면 complete: false 가 유지된다."""
+    fake_articles = [{"법령명": "건축법", "조": "제%d조" % i} for i in range(1, 251)]
+    fake = Answer({
+        "term": "건축",
+        "found": True,
+        "complete": False,
+        "note": "네트워크 지연으로 3페이지 누락",
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    res = _call("law_term", {"term": "건축", "offset": 0, "limit": 50})
+    assert res["complete"] is False
+    assert "네트워크 지연" in res["why"]
+    assert "이 결과로 '없다'·'전부다'라고 답하지 마라" in res["지시"]
+    # partial 안에 페이징 정보가 보존되는지 확인
+    assert res["partial"]["total"] == 250
+    assert len(res["partial"]["articles"]) == 50
+    assert res["partial"]["next_offset"] == 50
+
+
+# ---------------------------------------------------------------- 12. law_tree 페이징
+def test_law_tree_pagination_and_filtering(monkeypatch):
+    """law_tree 에 offset 과 limit 을 적용해 rows 범위를 확인하고 필터링과 결합한다."""
+    fake_rows = []
+    # 시행령 100건, 조례 150건 = 총 250건
+    for i in range(1, 101):
+        fake_rows.append({"위임구분": "시행령", "대상법령": "주차장법시행령%d" % i})
+    for i in range(1, 151):
+        fake_rows.append({"위임구분": "위임자치법규", "대상법령": "서울특별시조례%d" % i})
+
+    fake = Answer({
+        "law": "주차장법",
+        "complete": True,
+        "rows": fake_rows,
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: fake)
+    monkeypatch.setattr(kit.tree, "summary", lambda r: [])
+    monkeypatch.setattr(kit.tree, "subordinate_laws", lambda r: [])
+
+    # 1. 전체 rows 기본 페이징 (기본 limit=200): 200건, next_offset 200 -> complete: false
+    res1 = _call("law_tree", {"law": "주차장법"})
+    assert res1["complete"] is False
+    assert "offset=200" in res1["why"]
+    assert "전체 250건 중 1~200 번째만 줬다" in res1["why"]
+    assert res1["partial"]["total"] == 250
+    assert len(res1["partial"]["rows"]) == 200
+    assert res1["partial"]["next_offset"] == 200
+
+    # 2. 다음 페이지 호출 (offset=200, limit=200): 나머지 50건, 전체가 아니므로 complete: false
+    res2 = _call("law_tree", {"law": "주차장법", "offset": 200, "limit": 200})
+    assert res2["complete"] is False
+    assert "전체 250건 중 201~250 번째만 줬다" in res2["why"]
+    assert "앞 1~200번째" in res2["why"]
+    assert res2["partial"]["total"] == 250
+    assert len(res2["partial"]["rows"]) == 50
+    assert res2["partial"]["next_offset"] is None
+
+    # 3. group 필터링 결합 (조례 150건 대상, limit=50) -> next_offset=50 -> complete: false
+    res3 = _call("law_tree", {"law": "주차장법", "group": "위임자치법규", "offset": 0, "limit": 50})
+    assert res3["complete"] is False
+    assert "offset=50" in res3["why"]
+    assert res3["partial"]["total"] == 150
+    assert len(res3["partial"]["rows"]) == 50
+    assert res3["partial"]["next_offset"] == 50
+    assert all(r["위임구분"] == "위임자치법규" for r in res3["partial"]["rows"])
+
+    # 4. group 필터링 마지막 페이지 (offset=100, limit=50): 50건, 전체가 아니므로 complete: false
+    res4 = _call("law_tree", {"law": "주차장법", "group": "위임자치법규", "offset": 100, "limit": 50})
+    assert res4["complete"] is False
+    assert "전체 150건 중 101~150 번째만 줬다" in res4["why"]
+    assert "앞 1~100번째" in res4["why"]
+    assert res4["partial"]["total"] == 150
+    assert len(res4["partial"]["rows"]) == 50
+    assert res4["partial"]["next_offset"] is None
+
+
+def test_law_tree_pagination_preserves_incomplete(monkeypatch):
+    """law_tree 페이징 중에도 원래 rows 에 불완전 요소가 있으면 complete: false 가 유지된다."""
+    fake_rows = [{"위임구분": "시행령", "대상법령": "시행령%d" % i} for i in range(10)]
+    fake_rows.append({"complete": False, "why": "하위법령 조회 타임아웃"})
+
+    fake = Answer({
+        "law": "주차장법",
+        "complete": True,
+        "rows": fake_rows,
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: fake)
+    monkeypatch.setattr(kit.tree, "summary", lambda r: [])
+    monkeypatch.setattr(kit.tree, "subordinate_laws", lambda r: [])
+
+    res = _call("law_tree", {"law": "주차장법", "offset": 0, "limit": 5})
+    assert res["complete"] is False
+    assert "하위법령 조회 타임아웃" in res["why"]
+    assert "이 결과로 '없다'·'전부다'라고 답하지 마라" in res["지시"]
+
+
+# ---------------------------------------------------------------- 13. 결함 수정 정밀 시험
+def test_defect_1a_law_term_pagination_500_items(monkeypatch):
+    """500건 중 첫 페이지 complete:false, 마지막 페이지도 전체가 아니므로 complete:false"""
+    fake_articles = [{"법령명": "건축법", "조": "제%d조" % i} for i in range(1, 501)]
+    fake = Answer({
+        "term": "건축",
+        "found": True,
+        "complete": True,
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    # 1. 500건 첫 페이지 (기본 limit=200): complete:false, why 에 offset 및 건수 범위
+    res1 = _call("law_term", {"term": "건축"})
+    assert res1["complete"] is False
+    assert "offset=200" in res1["why"]
+    assert "전체 500건 중 1~200 번째만 줬다" in res1["why"]
+    assert "뒤 201~500번째" in res1["why"]
+    assert res1["partial"]["total"] == 500
+    assert len(res1["partial"]["articles"]) == 200
+    assert res1["partial"]["next_offset"] == 200
+
+    # 2. 마지막 페이지 (offset=400, limit=200): 전체를 다 담지 못했으므로 complete:false, 남은 100건, next_offset None
+    res_last = _call("law_term", {"term": "건축", "offset": 400, "limit": 200})
+    assert res_last["complete"] is False
+    assert "전체 500건 중 401~500 번째만 줬다" in res_last["why"]
+    assert "앞 1~400번째" in res_last["why"]
+    assert res_last["partial"]["total"] == 500
+    assert len(res_last["partial"]["articles"]) == 100
+    assert res_last["partial"]["next_offset"] is None
+
+
+def test_defect_1a_law_tree_pagination_500_items(monkeypatch):
+    """law_tree 동일: 500건 첫 페이지 complete:false, 마지막 페이지도 complete:false"""
+    fake_rows = [{"위임구분": "시행령", "대상법령": "령%d" % i} for i in range(1, 501)]
+    fake = Answer({
+        "law": "주차장법",
+        "complete": True,
+        "rows": fake_rows,
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: fake)
+    monkeypatch.setattr(kit.tree, "summary", lambda r: [])
+    monkeypatch.setattr(kit.tree, "subordinate_laws", lambda r: [])
+
+    # 1. 500건 첫 페이지 (기본 limit=200): complete:false, why 에 offset
+    res1 = _call("law_tree", {"law": "주차장법"})
+    assert res1["complete"] is False
+    assert "offset=200" in res1["why"]
+    assert "전체 500건 중 1~200 번째만 줬다" in res1["why"]
+    assert "뒤 201~500번째" in res1["why"]
+    assert res1["partial"]["total"] == 500
+    assert len(res1["partial"]["rows"]) == 200
+    assert res1["partial"]["next_offset"] == 200
+
+    # 2. 마지막 페이지 (offset=400, limit=200): complete:false
+    res_last = _call("law_tree", {"law": "주차장법", "offset": 400, "limit": 200})
+    assert res_last["complete"] is False
+    assert "전체 500건 중 401~500 번째만 줬다" in res_last["why"]
+    assert "앞 1~400번째" in res_last["why"]
+    assert res_last["partial"]["total"] == 500
+    assert len(res_last["partial"]["rows"]) == 100
+    assert res_last["partial"]["next_offset"] is None
+
+
+def test_defect_1b_missing_term_found_false_and_instruction(monkeypatch):
+    """미등재 용어: found:false 와 지시 확인 (complete 값은 원래 결과 True 를 따름)"""
+    fake = Answer({
+        "term": "미등재단어",
+        "found": False,
+        "complete": True,
+        "terms": [],
+        "articles": [],
+        "laws": [],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    res = _call("law_term", {"term": "미등재단어"})
+    assert res["found"] is False
+    assert res["complete"] is True
+    assert res["지시"] == "용어 사전에 없는 낱말이다. 조문이 없다는 뜻이 아니다 - law_search 로 본문검색하라"
+
+
+def test_defect_2_law_api_call_params_empty_and_required(monkeypatch):
+    """law_api: call.params 가 비었고 required 에 필수 인자 설명이 있음"""
+    fake_entry = {
+        "name": "판례 검색 API",
+        "endpoint": "http://www.law.go.kr/DRF/lawSearch.do",
+        "target": "prec",
+        "request_params": [
+            {"name": "OC", "value": "string(필수)", "desc": "인증키"},
+            {"name": "target", "value": "string(필수)", "desc": "서비스 대상"},
+            {"name": "type", "value": "char(필수)", "desc": "출력 형태"},
+            {"name": "query", "value": "string(필수)", "desc": "판례 질의어"},
+            {"name": "display", "value": "int(선택)", "desc": "조회 건수"}
+        ]
+    }
+    monkeypatch.setattr(kit.catalog, "describe", lambda t: [fake_entry])
+    res = _call("law_api", {"target": "prec"})
+    entry = res["entries"][0]
+    assert entry["call"]["params"] == {}
+    assert entry["call"]["target"] == "prec"
+    assert entry["call"]["service"] is False
+    assert entry["required"] == {"query": "판례 질의어"}
+
+
+def _call_raw(name, arguments):
+    writer = BufferWriter()
+    mcp_server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": name, "arguments": arguments}}, writer)
+    return writer.get_json_lines()[0]["result"]
+
+
+def test_pagination_rules_a5_law_term(monkeypatch):
+    """law_term 에 대한 4가지 결함/경계 케이스 + 정상 1케이스 전수 시험.
+    1. offset=400 끝 페이지 (500건 중 100건) -> complete: false, 앞 남은 범위 why
+    2. limit=0 및 음수 -> isError: true, 'limit 은 1 이상'
+    3. offset 음수 -> isError: true, 'offset 은 0 이상'
+    4. offset >= total (offset=500, total=500) -> complete: false, 'offset 이 전체 건수를 넘었다'
+    5. 정상 (offset=0, 전부 한 페이지) -> complete: true
+    """
+    fake_articles = [{"법령명": "건축법", "조": "제%d조" % i} for i in range(1, 501)]
+    fake = Answer({
+        "term": "건축",
+        "found": True,
+        "complete": True,
+        "terms": [],
+        "articles": fake_articles,
+        "laws": ["건축법"],
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    # 1. offset=400 끝 페이지 -> complete: false
+    res1 = _call("law_term", {"term": "건축", "offset": 400, "limit": 200})
+    assert res1["complete"] is False
+    assert "전체 500건 중 401~500 번째만 줬다" in res1["why"]
+    assert "앞 1~400번째" in res1["why"]
+    assert res1["partial"]["total"] == 500
+    assert len(res1["partial"]["articles"]) == 100
+    assert res1["partial"]["next_offset"] is None
+
+    # 2. limit=0 및 음수 -> isError: true
+    for bad_limit in (0, -1, -10):
+        raw = _call_raw("law_term", {"term": "건축", "limit": bad_limit})
+        assert raw["isError"] is True
+        assert "limit 은 1 이상" in raw["content"][0]["text"]
+
+    # 3. offset 음수 -> isError: true
+    for bad_offset in (-1, -100):
+        raw = _call_raw("law_term", {"term": "건축", "offset": bad_offset})
+        assert raw["isError"] is True
+        assert "offset 은 0 이상" in raw["content"][0]["text"]
+
+    # 4. offset >= total -> complete: false, 'offset 이 전체 건수를 넘었다'
+    res4 = _call("law_term", {"term": "건축", "offset": 500, "limit": 200})
+    assert res4["complete"] is False
+    assert "offset 이 전체 건수를 넘었다" in res4["why"]
+    assert res4["partial"]["total"] == 500
+    assert len(res4["partial"]["articles"]) == 0
+
+    # 5. 정상 (offset=0, 전부 한 페이지) -> 오직 이 경우만 complete: true
+    res5 = _call("law_term", {"term": "건축", "offset": 0, "limit": 500})
+    assert res5["complete"] is True
+    assert res5["total"] == 500
+    assert len(res5["articles"]) == 500
+    assert res5["next_offset"] is None
+
+
+def test_pagination_rules_a5_law_tree(monkeypatch):
+    """law_tree 에 대한 4가지 결함/경계 케이스 + 정상 1케이스 전수 시험.
+    1. offset=400 끝 페이지 (500건 중 100건) -> complete: false, 앞 남은 범위 why
+    2. limit=0 및 음수 -> isError: true, 'limit 은 1 이상'
+    3. offset 음수 -> isError: true, 'offset 은 0 이상'
+    4. offset >= total (offset=500, total=500) -> complete: false, 'offset 이 전체 건수를 넘었다'
+    5. 정상 (offset=0, 전부 한 페이지) -> complete: true
+    """
+    fake_rows = [{"위임구분": "시행령", "대상법령": "령%d" % i} for i in range(1, 501)]
+    fake = Answer({
+        "law": "주차장법",
+        "complete": True,
+        "rows": fake_rows,
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: fake)
+    monkeypatch.setattr(kit.tree, "summary", lambda r: [])
+    monkeypatch.setattr(kit.tree, "subordinate_laws", lambda r: [])
+
+    # 1. offset=400 끝 페이지 -> complete: false
+    res1 = _call("law_tree", {"law": "주차장법", "offset": 400, "limit": 200})
+    assert res1["complete"] is False
+    assert "전체 500건 중 401~500 번째만 줬다" in res1["why"]
+    assert "앞 1~400번째" in res1["why"]
+    assert res1["partial"]["total"] == 500
+    assert len(res1["partial"]["rows"]) == 100
+    assert res1["partial"]["next_offset"] is None
+
+    # 2. limit=0 및 음수 -> isError: true
+    for bad_limit in (0, -1, -10):
+        raw = _call_raw("law_tree", {"law": "주차장법", "limit": bad_limit})
+        assert raw["isError"] is True
+        assert "limit 은 1 이상" in raw["content"][0]["text"]
+
+    # 3. offset 음수 -> isError: true
+    for bad_offset in (-1, -100):
+        raw = _call_raw("law_tree", {"law": "주차장법", "offset": bad_offset})
+        assert raw["isError"] is True
+        assert "offset 은 0 이상" in raw["content"][0]["text"]
+
+    # 4. offset >= total -> complete: false, 'offset 이 전체 건수를 넘었다'
+    res4 = _call("law_tree", {"law": "주차장법", "offset": 500, "limit": 200})
+    assert res4["complete"] is False
+    assert "offset 이 전체 건수를 넘었다" in res4["why"]
+    assert res4["partial"]["total"] == 500
+    assert len(res4["partial"]["rows"]) == 0
+
+    # 5. 정상 (offset=0, 전부 한 페이지) -> 오직 이 경우만 complete: true
+    res5 = _call("law_tree", {"law": "주차장법", "offset": 0, "limit": 500})
+    assert res5["complete"] is True
+    assert res5["total"] == 500
+    assert len(res5["rows"]) == 500
+    assert res5["next_offset"] is None
+
+
+
+

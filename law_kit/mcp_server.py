@@ -89,7 +89,11 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "term": {"type": "string", "description": "조회할 법령용어 (예: 도시혁신구역)"}
+                "term": {"type": "string", "description": "조회할 법령용어 (예: 도시혁신구역)"},
+                "law": {"type": "string", "description": "이 법령명(일부 일치)의 조문만 좁혀서 본다."},
+                "with_text": {"type": "boolean", "description": "조문 본문(조문내용)까지 포함할지 여부 (기본값 false)."},
+                "offset": {"type": "integer", "description": "조문 목록 시작 위치 (기본값 0)"},
+                "limit": {"type": "integer", "description": "조문 목록 최대 반환 건수 (기본값 200)"}
             },
             "required": ["term"]
         }
@@ -102,7 +106,9 @@ TOOLS = [
             "properties": {
                 "law": {"type": "string", "description": "기준 법률명 (예: 주차장법)"},
                 "group": {"type": "string", "description": "이 위임구분의 조문 행만 (시행령, 시행규칙, 위임자치법규, 위임행정규칙, 인용법령). 비우면 구분별 건수와 하위법령 이름만 준다"},
-                "contains": {"type": "string", "description": "대상법령 이름에 이 말이 든 행만 (예: 서울특별시 강남구)"}
+                "contains": {"type": "string", "description": "대상법령 이름에 이 말이 든 행만 (예: 서울특별시 강남구)"},
+                "offset": {"type": "integer", "description": "위임 체계 rows 시작 위치 (기본값 0)"},
+                "limit": {"type": "integer", "description": "위임 체계 rows 최대 반환 건수 (기본값 200)"}
             },
             "required": ["law"]
         }
@@ -244,10 +250,13 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None):
         data = {"count": len(data), "items": data} if isinstance(data, list) else {"result": data}
 
     if gaps:
+        instruction = INSTRUCTION_INCOMPLETE
+        if isinstance(data, dict) and data.get("found") is False and "지시" in data:
+            instruction = data["지시"]
         payload = {
             "complete": False,
             "why": " | ".join(dict.fromkeys(gaps)),
-            "지시": INSTRUCTION_INCOMPLETE,
+            "지시": instruction,
             "partial": data,
         }
     else:
@@ -284,6 +293,123 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None):
         text_out = cut_text
 
     return text_out
+
+
+def _make_call_spec(entry):
+    """카탈로그 항목에서 law_call 에 넘길 인자 예시를 만든다.
+
+    왜 이 도우미가 필요한가:
+        카탈로그를 조회한 뒤 실제 API를 호출하려면 target 코드뿐 아니라
+        엔드포인트 구분(lawService 여부)을 파악해야 한다.
+        law_call 로 즉시 연계할 수 있는 인자 뼈대를 제공한다.
+        (필수 인자 설명문이 검색어로 오인 전송되지 않도록 params는 빈 딕셔너리로 비운다)
+    """
+    endpoint = entry.get("endpoint", "")
+    service = "lawService" in endpoint
+    return {
+        "target": entry.get("target", ""),
+        "service": service,
+        "params": {},
+    }
+
+
+def _enrich_api_entry(entry):
+    """엔트리 사본에 'call' 인자 예시와 필수 파라미터 설명을 붙인다."""
+    out = dict(entry)
+    required = {}
+    for p in entry.get("request_params", []):
+        val = p.get("value", "")
+        p_name = p.get("name", "")
+        if "필수" in val and p_name.strip() not in ("OC", "target", "type"):
+            required[p_name] = p.get("desc", "")
+    out["required"] = required
+    out["call"] = _make_call_spec(entry)
+    return out
+
+
+def _validate_paging(offset, limit):
+    """offset 과 limit 의 유효성을 검증한다.
+
+    limit 은 1 이상의 정수, offset 은 0 이상의 정수만 받는다.
+    아니면 ValueError 로 도구 오류(isError: True)를 발생시킨다.
+    """
+    if offset is None:
+        off = 0
+    else:
+        if isinstance(offset, bool):
+            raise ValueError("offset 은 0 이상의 정수여야 한다")
+        try:
+            off = int(offset)
+        except (ValueError, TypeError):
+            raise ValueError("offset 은 0 이상의 정수여야 한다")
+        if off < 0:
+            raise ValueError("offset 은 0 이상의 정수여야 한다")
+
+    if limit is None:
+        lim = 200
+    else:
+        if isinstance(limit, bool):
+            raise ValueError("limit 은 1 이상의 정수여야 한다")
+        try:
+            lim = int(limit)
+        except (ValueError, TypeError):
+            raise ValueError("limit 은 1 이상의 정수여야 한다")
+        if lim < 1:
+            raise ValueError("limit 은 1 이상의 정수여야 한다")
+
+    return off, lim
+
+
+def _paginate(items, offset, limit):
+    """목록을 offset 과 limit 범위만 자르고 total 과 next_offset 을 계산한다.
+
+    왜 이 도우미가 필요한가:
+        대용량 목록(조문 목록, 위임 체계 rows)을 한 번에 내려주면
+        MCP 60,000자 상한에 걸려 불완전 잘림이 발생한다.
+        offset/limit 으로 나누어 순차적으로 이어 읽을 수 있게 하되,
+        전체 건수(total)와 다음 위치(next_offset)를 함께 돌려주어
+        자른 것 자체가 불완전으로 오인되지 않도록 한다.
+    """
+    offset, limit = _validate_paging(offset, limit)
+    total = len(items)
+    paged = items[offset:offset + limit]
+    has_more = (offset + len(paged)) < total
+    next_offset = (offset + limit) if has_more else None
+    return total, paged, next_offset
+
+
+def _apply_pagination(items, raw_offset, raw_limit, missed):
+    """목록을 페이징하고 complete 여부와 남은 범위를 missed 에 반영한다.
+
+    원칙:
+        1. 전체를 다 담았을 때만 complete: true 다 (offset==0, next_offset is None, not missed).
+        2. offset 이 total 이상이면 complete: false 와 'offset 이 전체 건수를 넘었다'.
+        3. 그 밖에는 complete: false, why 에 '전체 N건 중 a~b 번째만 줬다' 와 앞/뒤에 남은 범위를 적는다.
+    """
+    offset, limit = _validate_paging(raw_offset, raw_limit)
+    total, paged, next_offset = _paginate(items, offset, limit)
+
+    if (total > 0 and offset >= total) or (total == 0 and offset > 0):
+        missed.append("offset 이 전체 건수를 넘었다 (offset=%d, total=%d)" % (offset, total))
+    elif offset > 0 or next_offset is not None:
+        a = offset + 1
+        b = offset + len(paged)
+        remains = []
+        if offset > 0:
+            remains.append("앞 1~%d번째(%d건)" % (offset, offset))
+        if b < total:
+            remains.append("뒤 %d~%d번째(%d건)" % (b + 1, total, total - b))
+        msg = "전체 %d건 중 %d~%d 번째만 줬다" % (total, a, b)
+        if remains:
+            msg += " (%s 남음)." % ", ".join(remains)
+        else:
+            msg += "."
+        if next_offset is not None:
+            msg += " offset=%s 으로 이어 읽어라" % next_offset
+        missed.append(msg)
+
+    is_complete = (not missed) and (offset == 0) and (next_offset is None)
+    return total, paged, next_offset, is_complete
 
 
 def dispatch_tool(name, args):
@@ -324,25 +450,101 @@ def dispatch_tool(name, args):
                 if full else ""}
     elif name == "law_term":
         term = args.get("term") or args.get("word")
-        return kit.terms.articles(term)
+        law_filter = args.get("law") or args.get("law_name")
+        with_text = bool(args.get("with_text", False))
+        found = kit.terms.articles(term)
+        # 통째로 주면 흔한 낱말(예: 건폐율)은 응답이 14만 자라 6만 자 상한에 잘린다(실측).
+        # 기본 200건씩 잘라 total·next_offset 으로 이어 읽게 한다.
+        missed = []
+        _walk(found, missed, "")      # 판정은 요약이 아니라 원래 결과 전체로
+        raw_articles = found.partial("articles") if hasattr(found, "partial") else dict.get(found, "articles")
+        if raw_articles is None:
+            raw_articles = found.partial("items") if hasattr(found, "partial") else dict.get(found, "items", [])
+        raw_articles = raw_articles or []
+
+        # 법령별 건수 집계 (전체 기준)
+        counts = {}
+        for r in raw_articles:
+            lname = r.get("법령명") or "미분류"
+            counts[lname] = counts.get(lname, 0) + 1
+        counts = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+        # law 필터가 있으면 해당 법령의 조문만
+        if law_filter:
+            key = "".join(str(law_filter).split())
+            filtered = [r for r in raw_articles
+                        if key in "".join(str(r.get("법령명", "")).split())]
+        else:
+            filtered = raw_articles
+
+        # with_text 가 false 면 조문내용(본문) 제외
+        articles_out = []
+        for r in filtered:
+            row = dict(r)
+            if not with_text:
+                row.pop("조문내용", None)
+            articles_out.append(row)
+
+        total, paged_articles, next_offset, is_complete = _apply_pagination(
+            articles_out, args.get("offset"), args.get("limit"), missed
+        )
+
+        is_found = bool(dict.get(found, "found", True))
+
+        kept_laws = list(dict.fromkeys(r.get("법령명") for r in articles_out if r.get("법령명")))
+        out = {
+            "term": term,
+            "found": is_found,
+            "total": total,
+            "next_offset": next_offset,
+            "complete": is_complete,
+            "why": " | ".join(dict.fromkeys(missed)),
+            "note": dict.get(found, "note", ""),
+            "counts": counts,
+            "laws": kept_laws,
+            "articles": paged_articles,
+        }
+        if not is_found:
+            out["지시"] = "용어 사전에 없는 낱말이다. 조문이 없다는 뜻이 아니다 - law_search 로 본문검색하라"
+
+        if isinstance(found, dict):
+            if "terms" in found:
+                out["terms"] = found.partial("terms") if hasattr(found, "partial") else dict.get(found, "terms")
+            if "items" in found:
+                out["items"] = paged_articles
+        return out
     elif name == "law_tree":
         law = args.get("law") or args.get("law_name")
         found = kit.tree.delegated(law)
         # 통째로 주면 주차장법 하나가 387만 자다(조례 4,839행, 실측) - 상한에
-        # 잘려 앞부분만 남는다. 기본은 건수와 이름, 행은 좁혀서 달라고 할 때만.
+        # 잘려 앞부분만 남는다. 기본 200행씩 잘라 total·next_offset 으로 이어 읽게 한다.
         missed = []
         _walk(found, missed, "")      # 판정은 요약이 아니라 원래 결과 전체로
-        out = {"law": law, "complete": not missed,
-               "why": " | ".join(dict.fromkeys(missed)),
-               "note": dict.get(found, "note", ""),
-               "counts": kit.tree.summary(found),
-               "하위법령": kit.tree.subordinate_laws(found)}
+
+        raw_rows = found.partial("rows") if hasattr(found, "partial") else dict.get(found, "rows")
+        raw_rows = raw_rows or []
         group, contains = args.get("group"), args.get("contains")
-        if group or contains:
-            rows = found.partial("rows") or []
-            out["rows"] = [r for r in rows
-                           if (not group or r.get("위임구분") == group)
-                           and (not contains or contains in str(r.get("대상법령", "")))]
+        filtered_rows = [
+            r for r in raw_rows
+            if (not group or r.get("위임구분") == group)
+            and (not contains or contains in str(r.get("대상법령", "")))
+        ]
+
+        total, paged_rows, next_offset, is_complete = _apply_pagination(
+            filtered_rows, args.get("offset"), args.get("limit"), missed
+        )
+
+        out = {
+            "law": law,
+            "total": total,
+            "next_offset": next_offset,
+            "complete": is_complete,
+            "why": " | ".join(dict.fromkeys(missed)),
+            "note": dict.get(found, "note", ""),
+            "counts": kit.tree.summary(found),
+            "하위법령": kit.tree.subordinate_laws(found),
+            "rows": paged_rows,
+        }
         return out
     elif name == "law_annex":
         law_name = args.get("law_name") or args.get("law")
@@ -366,8 +568,10 @@ def dispatch_tool(name, args):
         target = args.get("target")
         query = args.get("query")
         if target:
-            return {"target": target, "entries": kit.catalog.describe(target)}
-        return {"query": query or "", "entries": kit.catalog.search(query or "")}
+            entries = kit.catalog.describe(target)
+            return {"target": target, "entries": [_enrich_api_entry(e) for e in entries]}
+        entries = kit.catalog.search(query or "")
+        return {"query": query or "", "entries": [_enrich_api_entry(e) for e in entries]}
     elif name == "law_call":
         target = args.get("target")
         service = args.get("service", False)

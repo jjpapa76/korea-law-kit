@@ -65,6 +65,22 @@ python D:\...\korea-law-kit\korea_law_mcp.py
 키를 한 곳에만 두면 된다. 둘 다 없으면 `test` 로 떨어지고 결과가 제한된다 -
 `law_kit.client.is_demo_key()` 로 확인할 수 있고, MCP 응답에는 `경고` 가 붙는다.
 
+### 모든 에이전트에 등록
+
+Claude, Codex, Gemini/Antigravity, Grok, Hermes, OpenClaw, OpenCode, Cline 등
+PC의 모든 AI 에이전트에 korea-law MCP 서버와 사용 규칙을 한 번에 등록한다.
+
+```
+python tools/install_agents.py          # 미리보기 (바꿀 것만 출력, 변경 없음)
+python tools/install_agents.py --apply  # 실제 적용 (백업 후 멱등 등록)
+```
+
+인증키는 환경변수로 직접 등록한다:
+```
+setx LAW_API_OC <발급받은_인증키>
+```
+
+
 ## 지키는 것 셋
 
 **1. 토큰 0.** LLM 호출이 없다. 말로 두지 않고 시험으로 못 박았다
@@ -97,8 +113,9 @@ law_kit.search.all_pages("law", "의료폐기물", search_mode=2)   # 257/257, c
 ```
 
 **3. 캐시를 공유한다.** 법은 하루에 몇 번씩 바뀌지 않는다. 여러 프로그램이
-같은 법을 각각 받으면 하루 한도를 그만큼 더 쓴다. `LAW_KIT_CACHE` 를 같은
-곳으로 맞추면 두 번째부터는 호출이 0이다.
+같은 법을 각각 받으면 하루 한도를 그만큼 더 쓴다. 기본으로 사용자 홈의
+공유 폴더(`~/.cache/korea-law-kit`)를 바라보므로(필요 시 `LAW_KIT_CACHE` 로
+변경 가능) 두 번째부터는 호출이 0이다.
 
 실측(2026-09-22, 낱말 5개): 처음 4.08초 → 두 번째 **0.007초 (약 580배)**,
 API 호출 0회.
