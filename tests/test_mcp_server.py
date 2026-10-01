@@ -1795,4 +1795,124 @@ def test_read_guide_in_first_200_chars_for_large_responses_and_absent_in_small_r
     assert "읽기안내" not in parsed_small
 
 
+# ---------------------------------------------------------------- 19. 법 전체 사실(counts)과 이번에 담은 것 분리 검증 시험
+def test_budget_fitting_preserves_original_counts_and_adds_this_time_counts_law_tree(monkeypatch):
+    """작은 상한(6000/16000, 2000/4000)에서 law_tree 의 counts 가 원래 구분별 총 건수와 같고,
+    이번에_담은 은 실제 몸통 행 수와 같다 (주차장법 퇴행 방어).
+    """
+    fake_rows = []
+    fake_rows.append({"위임구분": "시행령", "대상법령": "주차장법 시행령"})
+    for i in range(1, 17):
+        fake_rows.append({"위임구분": "인용법령", "대상법령": "인용법령%d" % i})
+    for i in range(1, 4795):
+        fake_rows.append({
+            "위임구분": "위임자치법규",
+            "대상법령": "서울특별시 주차장 설치 및 관리 조례 제%d호 상세 규정 %s" % (i, "조례본문" * 10)
+        })
+
+    fake = Answer({"law": "주차장법", "complete": True, "rows": fake_rows})
+    orig_summary = [("시행령", 1), ("인용법령", 16), ("위임자치법규", 4794)]
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: fake)
+    monkeypatch.setattr(kit.tree, "summary", lambda r: orig_summary)
+
+    # 작은 상한 (6000/16000, 2000/4000) 시험
+    limits_cases = [
+        (6000, 16000),
+        (2000, 4000),
+    ]
+
+    for max_c, max_b in limits_cases:
+        monkeypatch.setenv("KOREA_LAW_MCP_MAX_CHARS", str(max_c))
+        monkeypatch.setenv("KOREA_LAW_MCP_MAX_BYTES", str(max_b))
+
+        text = _call_raw_text("law_tree", {"law": "주차장법"})
+        eff_c, eff_b = mcp_server.get_client_limits(None)
+        assert len(text) <= eff_c
+        assert len(text.encode("utf-8")) <= eff_b
+
+        parsed = json.loads(text)
+        assert parsed["complete"] is False
+        assert isinstance(parsed["partial"], dict)
+
+        # 1. counts 는 원래 구분별 총 건수 그대로 (위임자치법규 4,794건 보존, 다시 세지 않음)
+        expected_summary = [list(x) for x in orig_summary]
+        assert parsed["counts"] == expected_summary
+        assert parsed["partial"]["counts"] == expected_summary
+
+        # 2. 법령체계도 원래 그대로 보존
+        assert parsed["법령체계"]["시행령"] == ["주차장법 시행령"]
+
+        # 3. 이번에_담은 은 실제 몸통 행 수와 같음
+        body_rows = parsed["partial"]["rows"]
+        assert "이번에_담은" in parsed
+        assert "이번에_담은" in parsed["partial"]
+        this_counts = parsed["이번에_담은"]
+        assert sum(this_counts.values()) == len(body_rows)
+        # 구분별 실제 행 수 대조
+        for kind, cnt in this_counts.items():
+            actual_k_cnt = sum(1 for r in body_rows if r.get("위임구분") == kind)
+            assert cnt == actual_k_cnt
+
+        # 4. why 문장 일치 검증
+        assert "법령체계(시행령·시행규칙·행정규칙)는 이 응답에 모두 들어 있다. 잘린 것은 조례 목록뿐" in parsed["why"]
+        assert ("상한 때문에 이번에는 1~%d 번째만 담았다" % len(body_rows)) in parsed["why"]
+
+
+def test_budget_fitting_preserves_original_counts_and_adds_this_time_counts_law_term(monkeypatch):
+    """작은 상한(6000/16000, 2000/4000)에서 law_term 의 counts 가 원래 법령별 건수와 같고,
+    이번에_담은 은 실제 몸통 조문 수와 같다.
+    """
+    fake_articles = []
+    # 3개 법령에 걸친 조문 구성
+    for i in range(1, 21):
+        fake_articles.append({"법령명": "국토계획법", "조": "제%d조" % i, "조문내용": "국토계획내용 %d %s" % (i, "가" * 100)})
+    for i in range(1, 16):
+        fake_articles.append({"법령명": "주택법", "조": "제%d조" % i, "조문내용": "주택법내용 %d %s" % (i, "나" * 100)})
+    for i in range(1, 11):
+        fake_articles.append({"법령명": "건축법", "조": "제%d조" % i, "조문내용": "건축법내용 %d %s" % (i, "다" * 100)})
+
+    fake = Answer({
+        "term": "건폐율",
+        "found": True,
+        "complete": True,
+        "articles": fake_articles,
+    })
+    monkeypatch.setattr(kit.terms, "articles", lambda *a, **k: fake)
+
+    expected_counts = {"국토계획법": 20, "주택법": 15, "건축법": 10}
+
+    limits_cases = [
+        (6000, 16000),
+        (2000, 4000),
+    ]
+
+    for max_c, max_b in limits_cases:
+        monkeypatch.setenv("KOREA_LAW_MCP_MAX_CHARS", str(max_c))
+        monkeypatch.setenv("KOREA_LAW_MCP_MAX_BYTES", str(max_b))
+
+        text = _call_raw_text("law_term", {"term": "건폐율", "with_text": True})
+        eff_c, eff_b = mcp_server.get_client_limits(None)
+        assert len(text) <= eff_c
+        assert len(text.encode("utf-8")) <= eff_b
+
+        parsed = json.loads(text)
+        assert parsed["complete"] is False
+        assert isinstance(parsed["partial"], dict)
+
+        # 1. counts 는 원래 법령별 건수 그대로 (다시 세지 않음)
+        assert parsed["counts"] == expected_counts
+        assert parsed["partial"]["counts"] == expected_counts
+
+        # 2. 이번에_담은 은 실제 몸통 조문 수와 같음
+        body_articles = parsed["partial"]["articles"]
+        assert "이번에_담은" in parsed
+        assert "이번에_담은" in parsed["partial"]
+        assert parsed["이번에_담은"] == len(body_articles)
+        assert parsed["partial"]["이번에_담은"] == len(body_articles)
+
+        # 3. why 문장 일치 검증
+        assert ("상한 때문에 이번에는 1~%d 번째만 담았다" % len(body_articles)) in parsed["why"]
+
+
+
 

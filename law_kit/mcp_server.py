@@ -332,7 +332,7 @@ def _compute_count(data):
     # 2. 최상위 딕셔너리에서 리스트 찾기
     list_map = {}
     for k, v in data.items():
-        if k in ("counts", "incomplete"):
+        if k in ("counts", "incomplete", "이번에_담은"):
             # counts 는 요약 집계(튜플 리스트 등), incomplete 는 불완전 축 이름 리스트
             continue
         if isinstance(v, (list, tuple)):
@@ -415,12 +415,9 @@ def _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrin
                             summary_item["생략"] = orig_cnt - cur_cnt
                             # total 은 원래 결과 그대로 둔다
 
-    # 2. law_tree: 조례, 법령체계, counts 동기화
+    # 2. law_tree: 조례 동기화 및 이번에_담은 집계 (counts, 법령체계는 원래 값 유지)
     elif tool_type == "tree" and "rows" in data and isinstance(data["rows"], list):
         rows = data["rows"]
-        entry = next((e for e in list_entries if e.container is data and e.key == "rows"), None)
-        orig_cnt = len(entry.orig_items) if entry else len(rows)
-        cur_cnt = len(rows)
 
         # (1) 조례 목록 동기화
         seen_ord = set()
@@ -435,71 +432,30 @@ def _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrin
                         ords.append(t)
         data["조례"] = ords
 
-        # (2) 몸통(rows)을 줄였을 때만 법령체계와 counts 동기화
-        if cur_cnt < orig_cnt:
-            if "법령체계" in data and isinstance(data["법령체계"], dict):
-                new_hierarchy = {}
-                for kind in ("시행령", "시행규칙", "위임행정규칙"):
-                    seen_h = set()
-                    names_h = []
-                    for r in rows:
-                        if isinstance(r, dict) and r.get("위임구분") == kind:
-                            target = r.get("대상법령")
-                            if target and target not in seen_h:
-                                seen_h.add(target)
-                                names_h.append(target)
-                    new_hierarchy[kind] = names_h
-                for k in data["법령체계"]:
-                    if k not in new_hierarchy:
-                        seen_k = set()
-                        names_k = []
-                        for r in rows:
-                            if isinstance(r, dict) and r.get("위임구분") == k:
-                                target = r.get("대상법령")
-                                if target and target not in seen_k:
-                                    seen_k.add(target)
-                                    names_k.append(target)
-                        new_hierarchy[k] = names_k
-                data["법령체계"] = new_hierarchy
+        # (2) 이번에 담은 행 구분별 건수
+        row_counts = {}
+        for r in rows:
+            if isinstance(r, dict):
+                kind = r.get("위임구분") or "미분류"
+                row_counts[kind] = row_counts.get(kind, 0) + 1
+        GROUP_ORDER = ("시행령", "시행규칙", "위임행정규칙", "위임자치법규", "인용법령", "자체·미지정")
+        ordered_counts = {k: row_counts[k] for k in GROUP_ORDER if k in row_counts}
+        for k in row_counts:
+            if k not in ordered_counts:
+                ordered_counts[k] = row_counts[k]
+        data["이번에_담은"] = ordered_counts
 
-            if "counts" in data:
-                orig_counts = data["counts"]
-                row_counts = {}
-                for r in rows:
-                    if isinstance(r, dict):
-                        kind = r.get("위임구분") or "미분류"
-                        row_counts[kind] = row_counts.get(kind, 0) + 1
-                if isinstance(orig_counts, list):
-                    GROUP_ORDER = ("시행령", "시행규칙", "위임행정규칙", "위임자치법규", "인용법령", "자체·미지정")
-                    ordered = [(k, row_counts[k]) for k in GROUP_ORDER if k in row_counts]
-                    ordered += sorted(((k, v) for k, v in row_counts.items() if k not in GROUP_ORDER),
-                                      key=lambda kv: -kv[1])
-                    data["counts"] = ordered
-                elif isinstance(orig_counts, dict):
-                    data["counts"] = row_counts
-
-    # 3. law_term: laws, items, counts 동기화
+    # 3. law_term: laws, items 동기화 및 이번에_담은 집계 (counts 는 원래 값 유지)
     elif tool_type == "term" and "articles" in data and isinstance(data["articles"], list):
         articles = data["articles"]
-        entry = next((e for e in list_entries if e.container is data and e.key == "articles"), None)
-        orig_cnt = len(entry.orig_items) if entry else len(articles)
-        cur_cnt = len(articles)
 
         # (1) laws 및 items 동기화
         data["laws"] = list(dict.fromkeys(r.get("법령명") for r in articles if isinstance(r, dict) and r.get("법령명")))
         if "items" in data:
             data["items"] = articles
 
-        # (2) 몸통(articles)을 줄였고 counts_shrink_msg 가 없을 때만 counts 동기화
-        # 단, counts 의 법령 수가 20개 초과인 대형 counts 는 _shrink_counts_if_needed 에 맡기기 위해 줄이지 않음
-        if cur_cnt < orig_cnt and not counts_shrink_msg:
-            if "counts" in data and isinstance(data["counts"], dict) and len(data["counts"]) <= 20:
-                term_counts = {}
-                for r in articles:
-                    if isinstance(r, dict):
-                        lname = r.get("법령명") or "미분류"
-                        term_counts[lname] = term_counts.get(lname, 0) + 1
-                data["counts"] = dict(sorted(term_counts.items(), key=lambda kv: -kv[1]))
+        # (2) 이번에 담은 조문 수 동기화
+        data["이번에_담은"] = len(articles)
 
 
 def _collect_body_lists(data):
@@ -539,7 +495,7 @@ def _collect_body_lists(data):
             entries.append(_BodyListEntry("candidates", data["successor"], "candidates", tool_type))
 
     header_keys = {"complete", "why", "지시", "경고", "count", "total", "next_offset", "offset",
-                   "법령체계", "축별", "counts", "incomplete"}
+                   "법령체계", "축별", "counts", "이번에_담은", "incomplete"}
     for k, v in data.items():
         if k not in header_keys and isinstance(v, list) and not any(e.key == k for e in entries):
             entries.append(_BodyListEntry(k, data, k, tool_type))
@@ -553,7 +509,7 @@ def _truncate_long_strings_in_obj(obj, max_str_len=150, path="", truncated_recor
         truncated_records = []
 
     if isinstance(obj, dict):
-        skip_keys = {"법령체계", "축별", "counts", "why", "지시", "경고", "note", "_end", "읽기안내"}
+        skip_keys = {"법령체계", "축별", "counts", "이번에_담은", "why", "지시", "경고", "note", "_end", "읽기안내"}
         for k, v in list(obj.items()):
             if k in skip_keys:
                 continue
@@ -717,11 +673,13 @@ def _build_response_payload(data, is_complete, why, instruction, warning,
             payload["축별"] = data["축별"]
         if "counts" in data and ("term" in data or "articles" in data or "law" in data or "rows" in data):
             payload["counts"] = data["counts"]
+        if "이번에_담은" in data:
+            payload["이번에_담은"] = data["이번에_담은"]
 
     if is_complete:
         if isinstance(data, dict):
             header_keys = {"complete", "why", "지시", "경고", "count", "total", "next_offset", "offset",
-                           "법령체계", "축별", "counts", "_end", "읽기안내"}
+                           "법령체계", "축별", "counts", "이번에_담은", "_end", "읽기안내"}
             for k, v in data.items():
                 if k not in header_keys:
                     payload[k] = v
@@ -1302,6 +1260,7 @@ def dispatch_tool(name, args):
             "why": " | ".join(dict.fromkeys(missed)),
             "note": dict.get(found, "note", ""),
             "counts": counts,
+            "이번에_담은": len(paged_articles),
             "laws": kept_laws,
             "articles": paged_articles,
         }
@@ -1368,6 +1327,18 @@ def dispatch_tool(name, args):
                         seen_ord.add(target)
                         paged_ordinances.append(target)
 
+        # 이번에 담은 행 구분별 건수 (paged_rows 에서 추출)
+        paged_counts = {}
+        for r in paged_rows:
+            if isinstance(r, dict):
+                kind = r.get("위임구분") or "미분류"
+                paged_counts[kind] = paged_counts.get(kind, 0) + 1
+        GROUP_ORDER = ("시행령", "시행규칙", "위임행정규칙", "위임자치법규", "인용법령", "자체·미지정")
+        ordered_paged = {k: paged_counts[k] for k in GROUP_ORDER if k in paged_counts}
+        for k in paged_counts:
+            if k not in ordered_paged:
+                ordered_paged[k] = paged_counts[k]
+
         out = {
             "law": law,
             "total": total,
@@ -1377,6 +1348,7 @@ def dispatch_tool(name, args):
             "why": " | ".join(dict.fromkeys(missed)),
             "note": dict.get(found, "note", ""),
             "counts": kit.tree.summary(found),
+            "이번에_담은": ordered_paged,
             "법령체계": hierarchy,
             "조례": paged_ordinances,
             "rows": paged_rows,
