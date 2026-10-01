@@ -110,16 +110,76 @@ def find_executable(names):
     return None
 
 
-def update_json_file(label, path, modifier_fn, dry=False):
+def is_server_disabled(data, name=NAME):
+    """JSON 설정 데이터에서 사용자가 서버를 꺼 둔 상태인지 확인한다.
+
+    꺼 둔 표시 모양 3가지:
+    1. 최상위(또는 하위) _disabled_mcpServers 에 name 이 있는 경우 (dict 키 또는 list 항목)
+    2. _disabled_{name} 같은 키가 최상위 또는 하위에 존재하는 경우
+    3. name 항목의 설정에 "disabled": True 또는 "enabled": False 가 있는 경우
+    """
+    if not isinstance(data, (dict, list)):
+        return False
+
+    dis_prefix = f"_disabled_{name}"
+
+    def check(obj):
+        if isinstance(obj, dict):
+            # 1. _disabled_mcpServers 에 name 이 있는지
+            if "_disabled_mcpServers" in obj:
+                d = obj["_disabled_mcpServers"]
+                if isinstance(d, dict) and name in d:
+                    return True
+                if isinstance(d, (list, tuple, set)) and name in d:
+                    return True
+
+            # 2. _disabled_{name} 키가 있는지
+            if dis_prefix in obj:
+                return True
+
+            # 3. name 항목 내부의 disabled: True / enabled: False
+            if name in obj:
+                val = obj[name]
+                if isinstance(val, dict):
+                    if val.get("disabled") is True:
+                        return True
+                    if val.get("enabled") is False:
+                        return True
+
+            # 재귀적으로 하위 객체 탐색
+            for v in obj.values():
+                if check(v):
+                    return True
+
+        elif isinstance(obj, list):
+            for item in obj:
+                if check(item):
+                    return True
+
+        return False
+
+    return check(data)
+
+
+def update_json_file(label, path, modifier_fn, dry=False, create_if_missing=False):
     """JSON 설정 파일에서 지정된 수정을 적용한다."""
     if not os.path.exists(path):
-        say("%-14s 건너뜀 - 파일 없음 (%s)" % (label, path))
-        return False
-    try:
-        text, has_bom, newline = read_file_with_encoding(path)
-        data = json.loads(text)
-    except Exception as e:
-        say("%-14s 실패 - JSON 파싱 오류: %s (%s)" % (label, e, path))
+        if not create_if_missing:
+            say("%-14s 건너뜀 - 파일 없음 (%s)" % (label, path))
+            return False
+        data = {}
+        has_bom = False
+        newline = "\n"
+    else:
+        try:
+            text, has_bom, newline = read_file_with_encoding(path)
+            data = json.loads(text)
+        except Exception as e:
+            say("%-14s 실패 - JSON 파싱 오류: %s (%s)" % (label, e, path))
+            return False
+
+    if is_server_disabled(data, NAME):
+        say("%-14s 건너뜀: 사용자가 꺼 둔 상태 - 켜려면 앱에서 켜라 (%s)" % (label, path))
         return False
 
     modifier_fn(data)
@@ -255,11 +315,11 @@ def update_hermes_yaml(label, path, py_path, launcher_path, dry=False):
     return True
 
 
-def update_instruction_block(label, path, block_template, repo_path, dry=False):
+def update_instruction_block(label, path, block_template, repo_path, dry=False, allow_create_dir=False):
     """전역 지시문 파일(AGENTS.md, GEMINI.md 등)에 사용 규칙 블록을 멱등하게 붙인다."""
     if not os.path.exists(path):
         # 상위 디렉터리도 없으면 건너뜀
-        if not os.path.exists(os.path.dirname(path)):
+        if not os.path.exists(os.path.dirname(path)) and not allow_create_dir:
             say("%-14s 건너뜀 - 디렉터리 없음 (%s)" % (label, path))
             return False
         old = ""
@@ -279,9 +339,25 @@ def update_instruction_block(label, path, block_template, repo_path, dry=False):
 
     b, e = "<!-- korea-law-kit:begin -->", "<!-- korea-law-kit:end -->"
     if b in old and e in old:
-        new = old[:old.index(b)].rstrip("\r\n") + newline + newline + block_text + newline + old[old.index(e) + len(e):]
+        before = old[:old.index(b)].rstrip()
+        after = old[old.index(e) + len(e):].lstrip("\r\n")
+        parts = []
+        if before:
+            parts.append(before)
+            parts.append(newline + newline)
+        parts.append(block_text)
+        if after:
+            parts.append(newline + newline)
+            parts.append(after)
+        else:
+            parts.append(newline)
+        new = "".join(parts)
     else:
-        new = old.rstrip("\r\n") + newline + newline + block_text + newline if old.strip() else block_text + newline
+        before = old.rstrip()
+        if before:
+            new = before + newline + newline + block_text + newline
+        else:
+            new = block_text + newline
 
     if dry:
         say("[dry] %-14s 사용 규칙 블록 예정 -> %s" % (label, path))
@@ -391,12 +467,13 @@ def install(py=None, apply=False):
         )
 
     # (2) Antigravity IDE
-    update_json_file(
-        "Antigravity IDE",
-        os.path.join(home, ".gemini", "antigravity", "mcp_config.json"),
-        lambda d: d.setdefault("mcpServers", {}).__setitem__(NAME, {"command": py, "args": [LAUNCHER]}),
-        dry=dry
-    )
+    for ag_dir in ("antigravity-ide", "antigravity"):
+        update_json_file(
+            "Antigravity IDE",
+            os.path.join(home, ".gemini", ag_dir, "mcp_config.json"),
+            lambda d: d.setdefault("mcpServers", {}).__setitem__(NAME, {"command": py, "args": [LAUNCHER]}),
+            dry=dry
+        )
 
     # (3) Codex config.toml & AGENTS.md
     codex_homes = [os.path.join(home, ".codex")]
@@ -470,28 +547,40 @@ def install(py=None, apply=False):
             dry=dry
         )
 
+    # (9) OmO (senpi)
+    omo_agent_dir = os.path.join(home, ".omo", "agent")
+    update_json_file(
+        "OmO",
+        os.path.join(omo_agent_dir, "mcp.json"),
+        lambda d: d.setdefault("mcpServers", {}).__setitem__(NAME, {"command": py, "args": [LAUNCHER]}),
+        dry=dry,
+        create_if_missing=True
+    )
+
     # 4. 전역 지시문 (GEMINI.md / AGENTS.md)
     if block_template:
         update_instruction_block("Gemini/agy", os.path.join(home, ".gemini", "GEMINI.md"), block_template, REPO, dry=dry)
         update_instruction_block("agy config", os.path.join(home, ".gemini", "config", "AGENTS.md"), block_template, REPO, dry=dry)
+        update_instruction_block("OmO", os.path.join(omo_agent_dir, "AGENTS.md"), block_template, REPO, dry=dry, allow_create_dir=True)
 
-    # 5. Claude 스킬 설치
+    # 5. 스킬 설치 (Claude, OmO)
     skill_src = os.path.join(HERE, "skills", "korea-law", "SKILL.md")
     if os.path.exists(skill_src):
-        skill_dst_dir = os.path.join(home, ".claude", "skills", "korea-law")
-        skill_dst_file = os.path.join(skill_dst_dir, "SKILL.md")
-        if dry:
-            say("[dry] %-14s 스킬 복사 예정 -> %s" % ("Claude Skill", skill_dst_file))
-        else:
-            os.makedirs(skill_dst_dir, exist_ok=True)
-            with open(skill_src, "r", encoding="utf-8") as f:
-                skill_content = f.read()
-            skill_content = skill_content.replace("{REPO}", REPO)
-            atomic_write(skill_dst_file, skill_content, dry=dry)
-            say("%-14s 스킬 등록 (%s)" % ("Claude Skill", skill_dst_file))
-
-    # 6. 미지원 에이전트 안내
-    say("pi(OmO)        건너뜀 - MCP 등록 기능이 없어 건너뜁니다.")
+        for skill_label, skill_parent in [
+            ("Claude Skill", os.path.join(home, ".claude", "skills")),
+            ("OmO Skill", os.path.join(omo_agent_dir, "skills")),
+        ]:
+            skill_dst_dir = os.path.join(skill_parent, "korea-law")
+            skill_dst_file = os.path.join(skill_dst_dir, "SKILL.md")
+            if dry:
+                say("[dry] %-14s 스킬 복사 예정 -> %s" % (skill_label, skill_dst_file))
+            else:
+                os.makedirs(skill_dst_dir, exist_ok=True)
+                with open(skill_src, "r", encoding="utf-8") as f:
+                    skill_content = f.read()
+                skill_content = skill_content.replace("{REPO}", REPO)
+                atomic_write(skill_dst_file, skill_content, dry=dry)
+                say("%-14s 스킬 등록 (%s)" % (skill_label, skill_dst_file))
 
     say("")
     if dry:

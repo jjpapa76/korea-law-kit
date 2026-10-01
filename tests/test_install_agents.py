@@ -10,7 +10,7 @@ HOME, APPDATA, LOCALAPPDATA, HERMES_HOME 환경변수를 완전히 격리하고,
     2. --apply 실행 시 가짜 설정 파일 6종에 각각 korea-law 가 정상 등록되고 .bak-korea-law 백업 생성.
     3. --apply 를 2회 연속 실행해도 각 파일에 korea-law 항목이 정확히 1개만 존재 (멱등성 보장).
     4. 외부 CLI 가 가상으로 감지되어도 실제 실행 대신 mock 으로 안전하게 통과.
-    5. pi(OmO) 건너뜀 메시지가 출력됨.
+    5. Antigravity IDE 및 OmO(senpi) 정상 등록 및 멱등성 보장.
 """
 import io
 import json
@@ -140,10 +140,10 @@ def test_install_agents_dry_run_changes_nothing(mock_agent_env, capsys):
             bak = path.parent / (path.name + ".bak-korea-law")
             assert not bak.exists(), f"백업 파일이 생성됨: {bak}"
 
-    # pi(OmO) 건너뜀 출력 확인
+    # pi(OmO) 건너뜀 미출력 및 OmO 등록 예정 확인
     captured = capsys.readouterr().out
-    assert "pi(OmO)" in captured
-    assert "건너뜀" in captured
+    assert "pi(OmO)" not in captured
+    assert "OmO" in captured
 
 
 def test_install_agents_apply_and_idempotency(mock_agent_env, capsys):
@@ -196,10 +196,9 @@ def test_install_agents_apply_and_idempotency(mock_agent_env, capsys):
     cline_data = json.loads(env["cline_conf"].read_text(encoding="utf-8"))
     assert "korea-law" in cline_data["mcpServers"]
 
-    # pi(OmO) 건너뜀 출력 확인
+    # pi(OmO) 건너뜀 미출력 확인
     captured = capsys.readouterr().out
-    assert "pi(OmO)" in captured
-    assert "건너뜀" in captured
+    assert "pi(OmO)" not in captured
 
 
 def test_install_agents_does_not_call_setx_for_cache(mock_agent_env, capsys):
@@ -866,3 +865,313 @@ def test_openclaude_copilot_kiro_remove_then_add(tmp_path, monkeypatch, capsys):
     assert f"[dry] copilot        실행 예정 -> {copilot_path} mcp add korea-law -- python.exe" in dry_out
     assert f"[dry] kiro           실행 예정 -> {kiro_path} mcp remove --name korea-law --scope global" in dry_out
     assert f"[dry] kiro           실행 예정 -> {kiro_path} mcp add --name korea-law --scope global --command python.exe --args" in dry_out
+
+
+def test_antigravity_ide_and_omo_with_existing_files(tmp_path, monkeypatch):
+    """가짜 HOME 에 Antigravity IDE 와 OmO 설정 파일이 이미 있는 경우:
+    --apply 2회 실행 시 korea-law 정확히 1개, 다른 키 보존, 백업 생성, 스킬·AGENTS 블록 1개.
+    """
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    class DummyResult:
+        returncode = 0
+        stdout = b"ok"
+        stderr = b""
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: DummyResult())
+
+    # 1. Antigravity IDE mcp_config.json 준비 (다른 키 _disabled_mcpServers 보존 대상)
+    ag_ide_dir = home_dir / ".gemini" / "antigravity-ide"
+    ag_ide_dir.mkdir(parents=True)
+    ag_ide_conf = ag_ide_dir / "mcp_config.json"
+    initial_ag_data = {
+        "_disabled_mcpServers": {
+            "disabled_test": {"command": "disabled_cmd"}
+        },
+        "mcpServers": {
+            "existing_server": {
+                "command": "node",
+                "args": ["server.js"]
+            }
+        }
+    }
+    ag_ide_conf.write_text(json.dumps(initial_ag_data, indent=2) + "\n", encoding="utf-8")
+
+    # 2. OmO mcp.json 준비 (다른 키 settings 보존 대상)
+    omo_dir = home_dir / ".omo" / "agent"
+    omo_dir.mkdir(parents=True)
+    omo_conf = omo_dir / "mcp.json"
+    initial_omo_data = {
+        "settings": {
+            "model": "claude-3-5-sonnet",
+            "theme": "dark"
+        },
+        "mcpServers": {
+            "existing_omo_tool": {
+                "command": "tool_py",
+                "args": ["tool.py"]
+            }
+        }
+    }
+    omo_conf.write_text(json.dumps(initial_omo_data, indent=2) + "\n", encoding="utf-8")
+
+    # 3. OmO AGENTS.md 준비 (기존 텍스트)
+    omo_agents = omo_dir / "AGENTS.md"
+    omo_agents.write_text("# Project Custom Instructions\n\n- Do not fail.\n", encoding="utf-8")
+
+    # --apply 1회차 및 2회차 실행
+    ret1 = install_agents.install(py="python.exe", apply=True)
+    assert ret1 == 0
+    ret2 = install_agents.install(py="python.exe", apply=True)
+    assert ret2 == 0
+
+    # 검증 1: Antigravity IDE
+    # (1) 백업 파일 생성 확인
+    ag_bak = ag_ide_dir / "mcp_config.json.bak-korea-law"
+    assert ag_bak.exists(), "Antigravity IDE 백업 파일이 생성되지 않음"
+    # (2) korea-law 정확히 1개 및 다른 키 보존
+    ag_applied = json.loads(ag_ide_conf.read_text(encoding="utf-8"))
+    assert "_disabled_mcpServers" in ag_applied
+    assert "disabled_test" in ag_applied["_disabled_mcpServers"]
+    assert "existing_server" in ag_applied["mcpServers"]
+    assert "korea-law" in ag_applied["mcpServers"]
+    assert len([k for k in ag_applied["mcpServers"].keys() if k == "korea-law"]) == 1
+    assert ag_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
+    assert ag_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+
+    # 검증 2: OmO (senpi)
+    # (1) 백업 파일 생성 확인
+    omo_bak = omo_dir / "mcp.json.bak-korea-law"
+    assert omo_bak.exists(), "OmO 백업 파일이 생성되지 않음"
+    # (2) korea-law 정확히 1개 및 다른 키(settings, existing_omo_tool) 보존
+    omo_applied = json.loads(omo_conf.read_text(encoding="utf-8"))
+    assert "settings" in omo_applied
+    assert omo_applied["settings"]["model"] == "claude-3-5-sonnet"
+    assert omo_applied["settings"]["theme"] == "dark"
+    assert "existing_omo_tool" in omo_applied["mcpServers"]
+    assert "korea-law" in omo_applied["mcpServers"]
+    assert len([k for k in omo_applied["mcpServers"].keys() if k == "korea-law"]) == 1
+    assert omo_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
+    assert omo_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+    # (3) 스킬 파일 복사 및 {REPO} 치환 확인
+    omo_skill = omo_dir / "skills" / "korea-law" / "SKILL.md"
+    assert omo_skill.exists(), "OmO 스킬 파일이 복사되지 않음"
+    skill_content = omo_skill.read_text(encoding="utf-8")
+    assert install_agents.REPO in skill_content
+    assert "{REPO}" not in skill_content
+    # (4) 전역 지시문 블록 정확히 1개 및 기존 지시문 보존
+    agents_content = omo_agents.read_text(encoding="utf-8")
+    assert "# Project Custom Instructions" in agents_content
+    assert agents_content.count("<!-- korea-law-kit:begin -->") == 1
+    assert agents_content.count("<!-- korea-law-kit:end -->") == 1
+    assert install_agents.REPO in agents_content
+
+
+def test_antigravity_ide_and_omo_without_files(tmp_path, monkeypatch):
+    """가짜 HOME 에 Antigravity IDE 와 OmO 설정 파일이 없는 경우:
+    --apply 2회 실행 시:
+    - Antigravity IDE 는 파일이 없으므로 생성하지 않음 (건너뜀).
+    - OmO 는 mcp.json 을 새로 생성하여 korea-law 정확히 1개 등록.
+    - OmO 스킬 복사 및 AGENTS.md 블록 정확히 1개 생성.
+    """
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    class DummyResult:
+        returncode = 0
+        stdout = b"ok"
+        stderr = b""
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: DummyResult())
+
+    # 파일이 없는 상태에서 --apply 1회차 및 2회차 실행
+    ret1 = install_agents.install(py="python.exe", apply=True)
+    assert ret1 == 0
+    ret2 = install_agents.install(py="python.exe", apply=True)
+    assert ret2 == 0
+
+    # 검증 1: Antigravity IDE 는 생성되지 않아야 함
+    ag_ide_conf = home_dir / ".gemini" / "antigravity-ide" / "mcp_config.json"
+    assert not ag_ide_conf.exists(), "Antigravity IDE 파일이 없는 상태에서 새로 생성됨"
+
+    # 검증 2: OmO (senpi) 는 새로 생성되어야 함
+    omo_dir = home_dir / ".omo" / "agent"
+    omo_conf = omo_dir / "mcp.json"
+    assert omo_conf.exists(), "OmO mcp.json 파일이 새로 생성되지 않음"
+    omo_applied = json.loads(omo_conf.read_text(encoding="utf-8"))
+    assert "mcpServers" in omo_applied
+    assert "korea-law" in omo_applied["mcpServers"]
+    assert len([k for k in omo_applied["mcpServers"].keys() if k == "korea-law"]) == 1
+    assert omo_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
+    assert omo_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+
+    # 검증 3: OmO 스킬 확인
+    omo_skill = omo_dir / "skills" / "korea-law" / "SKILL.md"
+    assert omo_skill.exists(), "OmO 스킬 파일이 생성되지 않음"
+    skill_content = omo_skill.read_text(encoding="utf-8")
+    assert install_agents.REPO in skill_content
+    assert "{REPO}" not in skill_content
+
+    # 검증 4: OmO AGENTS.md 확인
+    omo_agents = omo_dir / "AGENTS.md"
+    assert omo_agents.exists(), "OmO AGENTS.md 파일이 생성되지 않음"
+    agents_content = omo_agents.read_text(encoding="utf-8")
+    assert agents_content.count("<!-- korea-law-kit:begin -->") == 1
+    assert agents_content.count("<!-- korea-law-kit:end -->") == 1
+    assert install_agents.REPO in agents_content
+
+
+def test_disabled_server_three_shapes_skipped_byte_identical(tmp_path, monkeypatch, capsys):
+    """사용자가 꺼 둔 세 모양 각각에서 파일이 바이트 그대로 보존되고 건너뜀이 출력되어야 한다.
+
+    모양 1: 최상위 _disabled_mcpServers 에 korea-law 가 있는 경우
+    모양 2: _disabled_korea-law 같은 키가 있는 경우
+    모양 3: 항목에 'disabled': true 또는 'enabled': false 가 있는 경우 (opencode 포함)
+    """
+    home_dir = tmp_path / "home"
+    appdata_dir = tmp_path / "AppData" / "Roaming"
+    home_dir.mkdir(parents=True)
+    appdata_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("APPDATA", str(appdata_dir))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    class DummyResult:
+        returncode = 0
+        stdout = b"ok"
+        stderr = b""
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: DummyResult())
+
+    # 모양 1: Antigravity IDE (_disabled_mcpServers 에 korea-law 있음)
+    ag_dir = home_dir / ".gemini" / "antigravity-ide"
+    ag_dir.mkdir(parents=True)
+    ag_conf = ag_dir / "mcp_config.json"
+    ag_json = '{\n  "_disabled_mcpServers": {\n    "korea-law": {\n      "command": "python"\n    }\n  },\n  "mcpServers": {}\n}\n'
+    ag_bytes = ag_json.encode("utf-8")
+    ag_conf.write_bytes(ag_bytes)
+
+    # 모양 2: Cline (_disabled_korea-law 키가 있음)
+    cline_dir = home_dir / ".cline" / "data" / "settings"
+    cline_dir.mkdir(parents=True)
+    cline_conf = cline_dir / "cline_mcp_settings.json"
+    cline_json = '{\n  "mcpServers": {\n    "_disabled_korea-law": {\n      "command": "python"\n    }\n  }\n}\n'
+    cline_bytes = cline_json.encode("utf-8")
+    cline_conf.write_bytes(cline_bytes)
+
+    # 모양 3-1: Claude Desktop (항목에 "disabled": true)
+    claude_dir = appdata_dir / "Claude"
+    claude_dir.mkdir(parents=True)
+    claude_conf = claude_dir / "claude_desktop_config.json"
+    claude_json = '{\n  "mcpServers": {\n    "korea-law": {\n      "command": "python",\n      "disabled": true\n    }\n  }\n}\n'
+    claude_bytes = claude_json.encode("utf-8")
+    claude_conf.write_bytes(claude_bytes)
+
+    # 모양 3-2: OpenCode opencode.json ("enabled": false) & mcp.json ("disabled": true)
+    opencode_dir = home_dir / ".config" / "opencode"
+    opencode_dir.mkdir(parents=True)
+    opencode_conf = opencode_dir / "opencode.json"
+    opencode_json = '{\n  "mcp": {\n    "korea-law": {\n      "type": "local",\n      "command": ["python"],\n      "enabled": false\n    }\n  }\n}\n'
+    opencode_bytes = opencode_json.encode("utf-8")
+    opencode_conf.write_bytes(opencode_bytes)
+
+    opencode_mcp = opencode_dir / "mcp.json"
+    opencode_mcp_json = '{\n  "mcpServers": {\n    "korea-law": {\n      "command": "python",\n      "disabled": true\n    }\n  }\n}\n'
+    opencode_mcp_bytes = opencode_mcp_json.encode("utf-8")
+    opencode_mcp.write_bytes(opencode_mcp_bytes)
+
+    # --apply 실행
+    ret = install_agents.install(py="python.exe", apply=True)
+    assert ret == 0
+
+    # 콘솔 출력 확인: 건너뜀 안내 문구 포함
+    out = capsys.readouterr().out
+    assert "건너뜀: 사용자가 꺼 둔 상태 - 켜려면 앱에서 켜라" in out
+
+    # 각 파일 바이트 그대로 보존 및 백업 미생성 검증
+    for conf, orig_bytes, label in [
+        (ag_conf, ag_bytes, "Antigravity IDE"),
+        (cline_conf, cline_bytes, "Cline"),
+        (claude_conf, claude_bytes, "Claude Desktop"),
+        (opencode_conf, opencode_bytes, "OpenCode opencode.json"),
+        (opencode_mcp, opencode_mcp_bytes, "OpenCode mcp.json"),
+    ]:
+        assert conf.read_bytes() == orig_bytes, f"{label} 파일 내용(바이트)이 변경되었습니다."
+        bak = conf.parent / (conf.name + ".bak-korea-law")
+        assert not bak.exists(), f"{label} 백업 파일이 생성되었습니다: {bak}"
+
+
+def test_agents_md_applied_three_times_byte_identical_with_one_blank_line(tmp_path, monkeypatch):
+    """AGENTS.md 에 --apply 를 3번 실행했을 때 2번째·3번째 결과가 1번째와 바이트 동일하고 블록은 1개이며 블록 앞에는 빈 줄 정확히 하나여야 한다."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    class DummyResult:
+        returncode = 0
+        stdout = b"ok"
+        stderr = b""
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: DummyResult())
+
+    # AGENTS.md 대상 디렉터리 및 파일 준비
+    gemini_dir = home_dir / ".gemini"
+    gemini_dir.mkdir(parents=True)
+    gemini_md = gemini_dir / "GEMINI.md"
+    gemini_init_text = "# Global Gemini Rules\n\nAlways follow instructions carefully.\n"
+    gemini_md.write_text(gemini_init_text, encoding="utf-8")
+
+    agy_config_dir = gemini_dir / "config"
+    agy_config_dir.mkdir(parents=True)
+    agy_agents_md = agy_config_dir / "AGENTS.md"
+    agy_init_text = "# Global AGY Instructions\n\nBe thorough and precise.\n"
+    agy_agents_md.write_text(agy_init_text, encoding="utf-8")
+
+    # 1회차 적용
+    ret1 = install_agents.install(py="python.exe", apply=True)
+    assert ret1 == 0
+    b1_gemini = gemini_md.read_bytes()
+    b1_agy = agy_agents_md.read_bytes()
+
+    # 2회차 적용
+    ret2 = install_agents.install(py="python.exe", apply=True)
+    assert ret2 == 0
+    b2_gemini = gemini_md.read_bytes()
+    b2_agy = agy_agents_md.read_bytes()
+
+    # 3회차 적용
+    ret3 = install_agents.install(py="python.exe", apply=True)
+    assert ret3 == 0
+    b3_gemini = gemini_md.read_bytes()
+    b3_agy = agy_agents_md.read_bytes()
+
+    # 바이트 동일성 검증: 2번째·3번째 결과가 1번째와 바이트 동일
+    assert b1_gemini == b2_gemini == b3_gemini, "GEMINI.md 바이트가 회차별로 일치하지 않음"
+    assert b1_agy == b2_agy == b3_agy, "AGENTS.md 바이트가 회차별로 일치하지 않음"
+
+    # 블록 개수 1개 검증 및 블록 앞 빈 줄 정확히 하나 검증
+    for md_file, name in [(gemini_md, "GEMINI.md"), (agy_agents_md, "AGENTS.md")]:
+        text = md_file.read_text(encoding="utf-8")
+        assert text.count("<!-- korea-law-kit:begin -->") == 1, f"{name} begin 블록 개수가 1개가 아님"
+        assert text.count("<!-- korea-law-kit:end -->") == 1, f"{name} end 블록 개수가 1개가 아님"
+
+        # 블록 앞 빈 줄 정확히 하나 (\n\n) 검증
+        b_idx = text.index("<!-- korea-law-kit:begin -->")
+        prefix = text[:b_idx]
+        assert prefix.endswith("\n\n"), f"{name} 블록 앞에 빈 줄이 없음"
+        assert not prefix.endswith("\n\n\n"), f"{name} 블록 앞에 빈 줄이 2개 이상임 (누적됨)"
+
+

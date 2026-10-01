@@ -52,8 +52,117 @@ DEMO_WARNING = (
     "결과가 제한됐을 수 있다. LAW_API_OC 를 설정하라"
 )
 
-#: 단일 응답 텍스트 최대 글자 수 상한
+#: 근거가 확인된 클라이언트별 (최대 글자 수, 최대 UTF-8 바이트 수) 표.
+#: 대소문자 무시 및 앞뒤 공백 제거 후 완전 일치만 적용한다.
+#: 실제 clientInfo.name 은 아직 모른다 - 표의 키는 후보 이름들을 넣되
+#: (예: "claude-code", "codex-mcp-client", "copilot", ...),
+#: 이름이 틀려도 기본값(가장 작은 쪽)으로 떨어지므로 안전하다.
+#: agy·Antigravity·cline·openclaude 등은 표에 넣지 않는다(기본값 적용).
+CLIENT_LIMITS_TABLE = {
+    # Claude Code (조사값 25,000토큰의 약 80%)
+    "claude-code": (50000, 150000),
+    "claude_code": (50000, 150000),
+    "claudecode": (50000, 150000),
+    "claude": (50000, 150000),
+    "claude-desktop": (50000, 150000),
+    # OpenAI Codex (조사값 10,000토큰의 약 80%)
+    "codex": (20000, 60000),
+    "codex-mcp-client": (20000, 60000),
+    "codex-cli": (20000, 60000),
+    # GitHub Copilot (조사값 20,480바이트의 약 80%)
+    "copilot": (7000, 16000),
+    "github-copilot": (7000, 16000),
+    "copilot-chat": (7000, 16000),
+    # OmO · senpi (조사값 51,200바이트의 약 80%)
+    "omo": (15000, 40000),
+    "senpi": (15000, 40000),
+    # Kiro (조사값 25,000자의 약 80%)
+    "kiro": (20000, 60000),
+    "kiro-cli": (20000, 60000),
+    # Hermes (조사값 50,000자의 약 80%)
+    "hermes": (40000, 120000),
+    "hermes-agent": (40000, 120000),
+    # Gemini CLI (조사값 40,000자의 약 80%)
+    "gemini-cli": (32000, 96000),
+    "gemini": (32000, 96000),
+    # Grok (조사값 20,000바이트의 약 80%)
+    "grok": (6000, 16000),
+    "grok-cli": (6000, 16000),
+    "grok-agent": (6000, 16000),
+}
+
+#: 모르는 이름이거나 이름이 없을 때의 기본 상한 (가장 작은 쪽)
+DEFAULT_LIMITS = (6000, 16000)
+
+#: 단일 응답 텍스트 최대 글자 수 상한 (이전 버전 호환용)
 MAX_TEXT_LENGTH = 60000
+
+#: agy(Antigravity CLI) 등 파일 저장 클라이언트 안내 문구 및 바이트 임계치 (3,800바이트 초과 시)
+READ_GUIDE_TEXT = (
+    "응답이 길어 클라이언트가 파일로 저장했을 수 있다. 저장됐다면 그 파일 전체를 읽은 뒤 답하라"
+)
+READ_GUIDE_THRESHOLD_BYTES = 3800
+
+#: 현재 연결된 클라이언트 상태 (initialize 시 저장)
+CURRENT_CLIENT = {
+    "name": "",
+    "version": ""
+}
+
+
+#: 환경변수 상한의 최솟값 (터무니없이 작게 설정되어 방어선이 무너지는 것을 방지)
+MIN_MAX_CHARS = 2000
+MIN_MAX_BYTES = 4000
+
+
+def get_client_limits(client_name=None):
+    """클라이언트 이름에 따른 (최대 글자 수, 최대 UTF-8 바이트 수)를 구한다.
+
+    환경변수 KOREA_LAW_MCP_MAX_CHARS, KOREA_LAW_MCP_MAX_BYTES 가 있으면
+    사용자 설정이 항상 최우선한다.
+    이름 비교는 소문자·앞뒤 공백 제거 후 완전 일치만 허용한다.
+    최솟값은 2000자 / 4000바이트로 고정하고, 작게 주면 최솟값으로 올리고 stderr 에 한 줄 알린다.
+    숫자가 아니거나 0·음수면 무시하고 기본값을 유지한다.
+    """
+    if client_name is None:
+        client_name = CURRENT_CLIENT.get("name", "")
+
+    max_chars, max_bytes = DEFAULT_LIMITS
+    if client_name:
+        cleaned = str(client_name).strip().lower()
+        max_chars, max_bytes = CLIENT_LIMITS_TABLE.get(cleaned, DEFAULT_LIMITS)
+
+    env_chars = os.environ.get("KOREA_LAW_MCP_MAX_CHARS")
+    if env_chars is not None and env_chars != "":
+        try:
+            val_chars = int(env_chars)
+            if val_chars > 0:
+                if val_chars < MIN_MAX_CHARS:
+                    sys.stderr.write("KOREA_LAW_MCP_MAX_CHARS(%d) 가 최솟값(%d자)보다 작아 %d자로 올린다\n" % (
+                        val_chars, MIN_MAX_CHARS, MIN_MAX_CHARS
+                    ))
+                    max_chars = MIN_MAX_CHARS
+                else:
+                    max_chars = val_chars
+        except (ValueError, TypeError):
+            pass
+
+    env_bytes = os.environ.get("KOREA_LAW_MCP_MAX_BYTES")
+    if env_bytes is not None and env_bytes != "":
+        try:
+            val_bytes = int(env_bytes)
+            if val_bytes > 0:
+                if val_bytes < MIN_MAX_BYTES:
+                    sys.stderr.write("KOREA_LAW_MCP_MAX_BYTES(%d) 가 최솟값(%d바이트)보다 작아 %d바이트로 올린다\n" % (
+                        val_bytes, MIN_MAX_BYTES, MIN_MAX_BYTES
+                    ))
+                    max_bytes = MIN_MAX_BYTES
+                else:
+                    max_bytes = val_bytes
+        except (ValueError, TypeError):
+            pass
+
+    return max_chars, max_bytes
 
 
 #: MCP 도구 9종 명세 정의
@@ -93,7 +202,7 @@ TOOLS = [
                 "law": {"type": "string", "description": "이 법령명(일부 일치)의 조문만 좁혀서 본다."},
                 "with_text": {"type": "boolean", "description": "조문 본문(조문내용)까지 포함할지 여부 (기본값 false)."},
                 "offset": {"type": "integer", "description": "조문 목록 시작 위치 (기본값 0)"},
-                "limit": {"type": "integer", "description": "조문 목록 최대 반환 건수 (기본값 200)"}
+                "limit": {"type": "integer", "description": "조문 목록 최대 반환 건수 (기본값 50)"}
             },
             "required": ["term"]
         }
@@ -108,7 +217,7 @@ TOOLS = [
                 "group": {"type": "string", "description": "이 위임구분의 조문 행만 (시행령, 시행규칙, 위임자치법규, 위임행정규칙, 인용법령). 비우면 구분별 건수와 하위법령 이름만 준다"},
                 "contains": {"type": "string", "description": "대상법령 이름에 이 말이 든 행만 (예: 서울특별시 강남구)"},
                 "offset": {"type": "integer", "description": "위임 체계 rows 시작 위치 (기본값 0)"},
-                "limit": {"type": "integer", "description": "위임 체계 rows 최대 반환 건수 (기본값 200)"}
+                "limit": {"type": "integer", "description": "위임 체계 rows 최대 반환 건수 (기본값 50)"}
             },
             "required": ["law"]
         }
@@ -196,23 +305,24 @@ def _walk(val, gaps, where):
     안쪽 Result/Answer 를 조용히 펴 버리면 겉의 complete: true 가 거짓
     보증이 된다 - 이 꾸러미가 막으려는 바로 그것이다.
     """
-    here = where or "결과"
+    here = where
+    prefix = ("%s: " % here) if here else ""
     if isinstance(val, Result):
         if not val.complete:
-            gaps.append("%s: %s" % (here, val.why_incomplete() or "끝까지 받지 못했다"))
+            gaps.append("%s%s" % (prefix, val.why_incomplete() or "끝까지 받지 못했다"))
         return [_walk(x, gaps, where) for x in val.partial]
     if isinstance(val, dict):
         if isinstance(val, Answer) and not dict.get(val, "complete", True):
-            gaps.append("%s: %s" % (here, val.why()))
+            gaps.append("%s%s" % (prefix, val.why()))
         elif not dict.get(val, "complete", True):
-            gaps.append("%s: %s" % (here, dict.get(val, "why")
-                                    or dict.get(val, "note") or "끝까지 받지 못했다"))
+            why_text = dict.get(val, "why") or dict.get(val, "note") or "끝까지 받지 못했다"
+            gaps.append("%s%s" % (prefix, why_text))
         if dict.get(val, "status") == "미확인":
-            gaps.append("%s: 미확인 - %s" % (here, dict.get(val, "why", "")))
+            gaps.append("%s미확인 - %s" % (prefix, dict.get(val, "why", "")))
         for key in ("gaps", "incomplete"):
             listed = dict.get(val, key)
             if listed:
-                gaps.append("%s.%s: %s" % (here, key, "; ".join(str(g) for g in listed)))
+                gaps.append("%s%s: %s" % (prefix, key, "; ".join(str(g) for g in listed)))
         return {k: _walk(dict.get(val, k), gaps, "%s.%s" % (where, k) if where else str(k))
                 for k in val.keys()}
     if isinstance(val, (list, tuple)):
@@ -220,22 +330,453 @@ def _walk(val, gaps, where):
     return val
 
 
-def serialize_response(val, is_incomplete_exc=False, exc_obj=None):
+def _compute_count(data):
+    """응답 데이터에서 주 목록의 항목 수(목록이 여러 개면 {이름: 개수})를 실제 길이로 센다."""
+    if isinstance(data, (list, tuple)):
+        return len(data)
+    if not isinstance(data, dict):
+        return 0
+
+    # 1. 특수 구조: axes (law_search)
+    if "axes" in data and isinstance(data["axes"], dict):
+        axes_counts = {}
+        for target, ax in data["axes"].items():
+            if isinstance(ax, dict):
+                items = ax.get("items")
+                if isinstance(items, (list, tuple)):
+                    axes_counts[target] = len(items)
+                elif "count" in ax and isinstance(ax["count"], int):
+                    axes_counts[target] = ax["count"]
+                else:
+                    axes_counts[target] = 0
+            else:
+                axes_counts[target] = 0
+        return axes_counts
+
+    # 2. 최상위 딕셔너리에서 리스트 찾기
+    list_map = {}
+    for k, v in data.items():
+        if k in ("counts", "incomplete"):
+            # counts 는 요약 집계(튜플 리스트 등), incomplete 는 불완전 축 이름 리스트
+            continue
+        if isinstance(v, (list, tuple)):
+            list_map[k] = len(v)
+
+    # 3. 최상위에 리스트가 없는 경우 대표적 하위 목록 확인 (예: law_history 의 successor.candidates)
+    if not list_map:
+        if "successor" in data and isinstance(data["successor"], dict):
+            cands = data["successor"].get("candidates")
+            if isinstance(cands, (list, tuple)):
+                return len(cands)
+        return 0
+
+    # 4. 리스트가 1개인 경우 -> 정수 반환
+    if len(list_map) == 1:
+        return next(iter(list_map.values()))
+
+    # 5. 리스트가 여러 개인 경우 -> {이름: 개수} dict 반환
+    return list_map
+
+
+class _BodyListEntry(object):
+    """몸통에서 줄일 수 있는 목록 정보를 담는 헬퍼 객체."""
+    def __init__(self, name, container, key, tool_type, is_primary_paged=False):
+        self.name = name
+        self.container = container
+        self.key = key
+        self.tool_type = tool_type
+        self.is_primary_paged = is_primary_paged
+        self.orig_items = list(container[key])
+        self.current_items = list(container[key])
+
+
+def _sync_dependent_lists(data, tool_type):
+    """주 목록이 축소되었을 때 종속 목록(조례, laws 등)을 일치시킨다."""
+    if tool_type == "tree" and "rows" in data:
+        seen = set()
+        ords = []
+        for r in data["rows"]:
+            if isinstance(r, dict):
+                kind = r.get("위임구분") or ""
+                if "자치법규" in kind or "조례" in kind:
+                    t = r.get("대상법령")
+                    if t and t not in seen:
+                        seen.add(t)
+                        ords.append(t)
+        data["조례"] = ords
+    elif tool_type == "term" and "articles" in data:
+        data["laws"] = list(dict.fromkeys(r.get("법령명") for r in data["articles"] if isinstance(r, dict) and r.get("법령명")))
+        if "items" in data:
+            data["items"] = data["articles"]
+
+
+def _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg=None):
+    """주 목록이 축소되었을 때 종속 목록 및 머리 요약(축별, 법령체계, counts)을 실제 몸통 기준으로 일치시킨다."""
+    # 1. law_search: 축별 머리 요약 및 각 axis 메타데이터 동기화
+    if tool_type == "search" and "axes" in data and isinstance(data["axes"], dict):
+        axes_summary = data.get("축별") if isinstance(data.get("축별"), dict) else None
+        for target, ax in data["axes"].items():
+            if not isinstance(ax, dict):
+                continue
+            lbl = ax.get("label") or target
+            items = ax.get("items")
+            if isinstance(items, list):
+                cur_cnt = len(items)
+                entry = next((e for e in list_entries if e.container is ax and e.key == "items"), None)
+                orig_cnt = len(entry.orig_items) if entry else cur_cnt
+
+                # 줄였을 때만 재계산
+                if cur_cnt < orig_cnt:
+                    ax["count"] = cur_cnt
+                    ax["complete"] = False
+                    ax["생략"] = orig_cnt - cur_cnt
+
+                    if axes_summary is not None:
+                        summary_item = axes_summary.get(lbl) or axes_summary.get(target)
+                        if isinstance(summary_item, dict):
+                            summary_item["받은"] = cur_cnt
+                            summary_item["complete"] = False
+                            summary_item["생략"] = orig_cnt - cur_cnt
+                            # total 은 원래 결과 그대로 둔다
+
+    # 2. law_tree: 조례, 법령체계, counts 동기화
+    elif tool_type == "tree" and "rows" in data and isinstance(data["rows"], list):
+        rows = data["rows"]
+        entry = next((e for e in list_entries if e.container is data and e.key == "rows"), None)
+        orig_cnt = len(entry.orig_items) if entry else len(rows)
+        cur_cnt = len(rows)
+
+        # (1) 조례 목록 동기화
+        seen_ord = set()
+        ords = []
+        for r in rows:
+            if isinstance(r, dict):
+                kind = r.get("위임구분") or ""
+                if "자치법규" in kind or "조례" in kind:
+                    t = r.get("대상법령")
+                    if t and t not in seen_ord:
+                        seen_ord.add(t)
+                        ords.append(t)
+        data["조례"] = ords
+
+        # (2) 몸통(rows)을 줄였을 때만 법령체계와 counts 동기화
+        if cur_cnt < orig_cnt:
+            if "법령체계" in data and isinstance(data["법령체계"], dict):
+                new_hierarchy = {}
+                for kind in ("시행령", "시행규칙", "위임행정규칙"):
+                    seen_h = set()
+                    names_h = []
+                    for r in rows:
+                        if isinstance(r, dict) and r.get("위임구분") == kind:
+                            target = r.get("대상법령")
+                            if target and target not in seen_h:
+                                seen_h.add(target)
+                                names_h.append(target)
+                    new_hierarchy[kind] = names_h
+                for k in data["법령체계"]:
+                    if k not in new_hierarchy:
+                        seen_k = set()
+                        names_k = []
+                        for r in rows:
+                            if isinstance(r, dict) and r.get("위임구분") == k:
+                                target = r.get("대상법령")
+                                if target and target not in seen_k:
+                                    seen_k.add(target)
+                                    names_k.append(target)
+                        new_hierarchy[k] = names_k
+                data["법령체계"] = new_hierarchy
+
+            if "counts" in data:
+                orig_counts = data["counts"]
+                row_counts = {}
+                for r in rows:
+                    if isinstance(r, dict):
+                        kind = r.get("위임구분") or "미분류"
+                        row_counts[kind] = row_counts.get(kind, 0) + 1
+                if isinstance(orig_counts, list):
+                    GROUP_ORDER = ("시행령", "시행규칙", "위임행정규칙", "위임자치법규", "인용법령", "자체·미지정")
+                    ordered = [(k, row_counts[k]) for k in GROUP_ORDER if k in row_counts]
+                    ordered += sorted(((k, v) for k, v in row_counts.items() if k not in GROUP_ORDER),
+                                      key=lambda kv: -kv[1])
+                    data["counts"] = ordered
+                elif isinstance(orig_counts, dict):
+                    data["counts"] = row_counts
+
+    # 3. law_term: laws, items, counts 동기화
+    elif tool_type == "term" and "articles" in data and isinstance(data["articles"], list):
+        articles = data["articles"]
+        entry = next((e for e in list_entries if e.container is data and e.key == "articles"), None)
+        orig_cnt = len(entry.orig_items) if entry else len(articles)
+        cur_cnt = len(articles)
+
+        # (1) laws 및 items 동기화
+        data["laws"] = list(dict.fromkeys(r.get("법령명") for r in articles if isinstance(r, dict) and r.get("법령명")))
+        if "items" in data:
+            data["items"] = articles
+
+        # (2) 몸통(articles)을 줄였고 counts_shrink_msg 가 없을 때만 counts 동기화
+        # 단, counts 의 법령 수가 20개 초과인 대형 counts 는 _shrink_counts_if_needed 에 맡기기 위해 줄이지 않음
+        if cur_cnt < orig_cnt and not counts_shrink_msg:
+            if "counts" in data and isinstance(data["counts"], dict) and len(data["counts"]) <= 20:
+                term_counts = {}
+                for r in articles:
+                    if isinstance(r, dict):
+                        lname = r.get("법령명") or "미분류"
+                        term_counts[lname] = term_counts.get(lname, 0) + 1
+                data["counts"] = dict(sorted(term_counts.items(), key=lambda kv: -kv[1]))
+
+
+def _collect_body_lists(data):
+    """머리 요약을 제외하고 몸통에서 줄일 수 있는 목록 엔트리들을 수집한다."""
+    entries = []
+    # 1. law_tree: 법령체계와 counts 는 머리이므로 줄이지 않고 rows 만 줄임 (조례는 rows 에 연동)
+    if "법령체계" in data and "rows" in data:
+        if isinstance(data["rows"], list):
+            entries.append(_BodyListEntry("rows", data, "rows", "tree", is_primary_paged=True))
+        return entries, "tree"
+
+    # 2. law_term: counts 는 머리이므로 줄이지 않고 articles 만 줄임 (laws 는 articles 에 연동)
+    if "articles" in data:
+        if isinstance(data["articles"], list):
+            entries.append(_BodyListEntry("articles", data, "articles", "term", is_primary_paged=True))
+        return entries, "term"
+
+    # 3. law_search: 축별 은 머리이므로 줄이지 않고 각 축의 items 목록을 줄임
+    if "axes" in data and isinstance(data["axes"], dict):
+        for target, ax in data["axes"].items():
+            if isinstance(ax, dict) and "items" in ax and isinstance(ax["items"], list):
+                lbl = ax.get("label") or target
+                entries.append(_BodyListEntry(lbl, ax, "items", "search"))
+        return entries, "search"
+
+    # 4. 기타 도구들
+    tool_type = "other"
+    if "items" in data and isinstance(data["items"], list):
+        entries.append(_BodyListEntry("items", data, "items", tool_type))
+    if "entries" in data and isinstance(data["entries"], list):
+        entries.append(_BodyListEntry("entries", data, "entries", tool_type))
+    if "annexes" in data and isinstance(data["annexes"], list):
+        entries.append(_BodyListEntry("annexes", data, "annexes", tool_type))
+    if "successor" in data and isinstance(data["successor"], dict):
+        cands = data["successor"].get("candidates")
+        if isinstance(cands, list):
+            entries.append(_BodyListEntry("candidates", data["successor"], "candidates", tool_type))
+
+    header_keys = {"complete", "why", "지시", "경고", "count", "total", "next_offset", "offset",
+                   "법령체계", "축별", "counts", "incomplete"}
+    for k, v in data.items():
+        if k not in header_keys and isinstance(v, list) and not any(e.key == k for e in entries):
+            entries.append(_BodyListEntry(k, data, k, tool_type))
+
+    return entries, tool_type
+
+
+def _truncate_long_strings_in_obj(obj, max_str_len=150, path="", truncated_records=None):
+    """긴 문자열을 앞부분만 남기고 생략 표기를 덧붙이며, 축소 정보를 기록한다."""
+    if truncated_records is None:
+        truncated_records = []
+
+    if isinstance(obj, dict):
+        skip_keys = {"법령체계", "축별", "counts", "why", "지시", "경고", "note", "_end", "읽기안내"}
+        for k, v in list(obj.items()):
+            if k in skip_keys:
+                continue
+            subpath = "%s.%s" % (path, k) if path else str(k)
+            if isinstance(v, str) and len(v) > max_str_len + 30:
+                omitted = len(v) - max_str_len
+                obj[k] = v[:max_str_len] + "…(%d자 생략)" % omitted
+                truncated_records.append((subpath, max_str_len, omitted))
+            elif isinstance(v, (dict, list)):
+                _truncate_long_strings_in_obj(v, max_str_len, subpath, truncated_records)
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            subpath = "%s[%d]" % (path, i)
+            if isinstance(item, str) and len(item) > max_str_len + 30:
+                omitted = len(item) - max_str_len
+                obj[i] = item[:max_str_len] + "…(%d자 생략)" % omitted
+                truncated_records.append((subpath, max_str_len, omitted))
+            elif isinstance(item, (dict, list)):
+                _truncate_long_strings_in_obj(item, max_str_len, subpath, truncated_records)
+    return truncated_records
+
+
+def _format_str_trunc_msg(records):
+    """긴 문자열 축소 기록을 why 안내 문구로 포맷한다."""
+    if not records:
+        return None
+    unique_paths = list(dict.fromkeys(r[0] for r in records))
+    total_omitted = sum(r[2] for r in records)
+    n = records[0][1]
+    if len(unique_paths) == 1:
+        return "상한 때문에 %s 의 긴 글을 앞 %d자만 남겼다(%d자 생략)" % (unique_paths[0], n, total_omitted)
+    else:
+        return "상한 때문에 %d곳 의 긴 글을 앞 %d자만 남겼다(%d자 생략)" % (len(unique_paths), n, total_omitted)
+
+
+def _shrink_counts_if_needed(data):
+    """머리의 counts(법령별 건수)가 너무 커서 몸통이 0건이 되면, counts 를 상위 20개 + '그 밖 N개 법령' 으로 줄인다."""
+    if not isinstance(data, dict):
+        return False, None
+    counts = data.get("counts")
+    if not isinstance(counts, dict) or len(counts) <= 20:
+        return False, None
+
+    orig_items = list(counts.items())
+    top20 = dict(orig_items[:20])
+    rest_items = orig_items[20:]
+    rest_n = len(rest_items)
+    rest_sum = sum(v for _, v in rest_items if isinstance(v, (int, float)))
+
+    key_rest = "그 밖 %d개 법령" % rest_n
+    top20[key_rest] = rest_sum
+    data["counts"] = top20
+
+    msg = "상한 때문에 법령별 건수(counts)는 상위 20개만 담았다(그 밖 %d개 법령)" % rest_n
+    return True, msg
+
+
+def _truncate_single_item(item, max_str_len=30):
+    """1건도 안 들어갈 때 해당 항목 안의 긴 문자열들을 대폭 축소한다."""
+    if isinstance(item, dict):
+        for k, v in list(item.items()):
+            if isinstance(v, str) and len(v) > max_str_len:
+                omitted = len(v) - max_str_len
+                item[k] = v[:max_str_len] + "…(%d자 생략)" % omitted
+            elif isinstance(v, (dict, list)):
+                _truncate_single_item(v, max_str_len)
+    elif isinstance(item, list):
+        for i, val in enumerate(item):
+            if isinstance(val, str) and len(val) > max_str_len:
+                omitted = len(val) - max_str_len
+                item[i] = val[:max_str_len] + "…(%d자 생략)" % omitted
+            elif isinstance(val, (dict, list)):
+                _truncate_single_item(val, max_str_len)
+
+
+def _compute_current_why_and_next_offset(data, tool_type, list_entries, gaps, counts_shrink_msg=None, str_trunc_msg=None):
+    """현재 축소 상태에 따른 정확한 why 와 next_offset 을 계산한다."""
+    is_paged = tool_type in ("tree", "term")
+    why_parts = []
+    next_offset_val = None
+
+    if is_paged:
+        orig_offset = data.get("offset", 0)
+        if tool_type == "tree":
+            kept_count = len(data.get("rows", []))
+        else:
+            kept_count = len(data.get("articles", []))
+        next_offset_val = orig_offset + kept_count
+
+        a = orig_offset + 1
+        b = orig_offset + kept_count
+        if kept_count > 0:
+            paged_why = "상한 때문에 이번에는 %d~%d 번째만 담았다. offset=%d 으로 이어 읽어라" % (a, b, next_offset_val)
+        else:
+            paged_why = "상한 때문에 이번에는 0건만 담았다. offset=%d 으로 이어 읽어라" % next_offset_val
+
+        if tool_type == "tree":
+            # 원래 결과 자체에 법령체계 오류/불완전이 없었는지 확인
+            has_orig_hierarchy_flaw = any("연혁 조회 실패" in g or "조회 실패" in g for g in gaps)
+            if not has_orig_hierarchy_flaw:
+                why_parts.append("법령체계(시행령·시행규칙·행정규칙)는 이 응답에 모두 들어 있다. 잘린 것은 조례 목록뿐")
+            why_parts.append(paged_why)
+        else:
+            why_parts.append(paged_why)
+
+        if str_trunc_msg:
+            why_parts.append(str_trunc_msg)
+
+        if counts_shrink_msg:
+            why_parts.append(counts_shrink_msg)
+
+        if gaps:
+            for g in gaps:
+                if "번째만 줬다" not in g and "이어 읽어라" not in g and "상한 때문에" not in g and "잘린 것은 조례" not in g:
+                    why_parts.append(g)
+    else:
+        for e in list_entries:
+            omitted = len(e.orig_items) - len(e.current_items)
+            if omitted > 0:
+                why_parts.append("상한 때문에 %s 에서 %d건을 뺐다. 범위를 좁혀 다시 물어라" % (e.name, omitted))
+        if str_trunc_msg:
+            why_parts.append(str_trunc_msg)
+        if counts_shrink_msg:
+            why_parts.append(counts_shrink_msg)
+        if gaps:
+            for g in gaps:
+                if "상한 때문에" not in g:
+                    why_parts.append(g)
+
+    final_why = " | ".join(dict.fromkeys(why_parts))
+    return final_why, next_offset_val
+
+
+def _build_response_payload(data, is_complete, why, instruction, warning,
+                            count_val, total_val, next_offset_val, read_guide=None):
+    """머리, 도구별 요약, 몸통, _end 꼬리를 올바른 순서로 조립한다."""
+    payload = {}
+    payload["complete"] = is_complete
+    if read_guide:
+        payload["읽기안내"] = read_guide
+    if not is_complete or why:
+        if why:
+            payload["why"] = why
+    if instruction:
+        payload["지시"] = instruction
+    if warning:
+        payload["경고"] = warning
+    payload["count"] = count_val
+    if total_val is not None:
+        payload["total"] = total_val
+    if next_offset_val is not None:
+        payload["next_offset"] = next_offset_val
+    elif isinstance(data, dict) and "next_offset" in data:
+        payload["next_offset"] = data["next_offset"]
+
+    # 도구별 요약 (머리 - 줄이지 않고 앞부분에 배치)
+    if isinstance(data, dict):
+        if "법령체계" in data:
+            payload["법령체계"] = data["법령체계"]
+        if "축별" in data:
+            payload["축별"] = data["축별"]
+        if "counts" in data and ("term" in data or "articles" in data or "law" in data or "rows" in data):
+            payload["counts"] = data["counts"]
+
+    if is_complete:
+        if isinstance(data, dict):
+            header_keys = {"complete", "why", "지시", "경고", "count", "total", "next_offset", "offset",
+                           "법령체계", "축별", "counts", "_end", "읽기안내"}
+            for k, v in data.items():
+                if k not in header_keys:
+                    payload[k] = v
+        else:
+            payload["data"] = data
+    else:
+        payload["partial"] = data
+
+    payload["_end"] = {
+        "complete": is_complete,
+        "count": count_val
+    }
+    return payload
+
+
+def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=None):
     """Result/Answer/dict/list 를 한 곳에서 JSON 문자열로 직렬화한다.
 
     왜 한 곳에 모으는가:
-        불완전 결과 방어, 데모 키 경고, 60,000자 절단 방어는
+        불완전 결과 방어, 데모 키 경고, 클라이언트별 상한 절단 방어는
         모든 도구 응답에 일관되게 적용되어야 하는 핵심 계약이다.
         여러 곳에 흩어지면 특정 도구에서 불완전 결과가 complete 로
         누출되는 사고가 재발할 수 있다.
 
-    지키는 원칙:
-        1. Result.complete 가 False, Answer 의 complete 가 False,
-           Incomplete 예외, 또는 gaps/incomplete 가 비어 있지 않으면
-           반드시 complete: false, why, 지시, partial 로 구성한다.
-        2. 데모 키(test) 사용 시 경고 문구를 포함한다.
-        3. 60,000자를 초과하면 절단하고 complete: false 와 사유를 남긴다.
-        4. 한글은 ensure_ascii=False 로 온전히 출력한다.
+    첫 키 고정 계약:
+        codex 절단(가운데 절단) 및 모델 카운트 오류를 원천 차단하기 위해,
+        모든 도구 응답(오류 응답 포함)의 앞 키 순서를 고정한다:
+        "complete" -> "why"(불완전일 때) -> "지시"(있을 때) -> "경고"(데모 키일 때)
+        -> "count"(주 목록 항목 수, 목록 여러 개면 {이름: 개수}) -> "total"(알면)
+        -> "next_offset"(알면) -> 도구별 요약("법령체계", "축별", "counts")
+        -> 실제 데이터(완전일 때) 또는 partial(불완전일 때) -> 맨 끝 "_end": {"complete": ..., "count": ...}
     """
     gaps = []
     if is_incomplete_exc:
@@ -249,48 +790,330 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None):
     elif not isinstance(data, dict):
         data = {"count": len(data), "items": data} if isinstance(data, list) else {"result": data}
 
-    if gaps:
+    is_complete = not gaps
+    if isinstance(data, dict) and data.get("complete") is False:
+        is_complete = False
+        if data.get("why") and data["why"] not in gaps:
+            gaps.append(data["why"])
+
+    # 지시 추출
+    instruction = None
+    if not is_complete:
         instruction = INSTRUCTION_INCOMPLETE
         if isinstance(data, dict) and data.get("found") is False and "지시" in data:
             instruction = data["지시"]
-        payload = {
-            "complete": False,
-            "why": " | ".join(dict.fromkeys(gaps)),
-            "지시": instruction,
-            "partial": data,
-        }
-    else:
-        payload = dict(data)
-        payload["complete"] = True
+    elif isinstance(data, dict) and "지시" in data:
+        instruction = data["지시"]
 
-    # 데모 키 사용 중이면 사용자 주의를 위해 경고 첨부
+    # 경고 추출
+    warning = None
     if kit.client.is_demo_key():
-        payload["경고"] = DEMO_WARNING
+        warning = DEMO_WARNING
+    elif isinstance(data, dict) and "경고" in data:
+        warning = data["경고"]
 
+    # why 추출
+    why = " | ".join(dict.fromkeys(gaps)) if gaps else None
+
+    # count 및 total 계산 (직렬화 직전에 실제 리스트 길이로 측정)
+    count_val = _compute_count(data)
+    total_val = None
+    if isinstance(val, Result) and val.total is not None:
+        total_val = val.total
+    elif isinstance(data, dict) and data.get("total") is not None:
+        total_val = data["total"]
+
+    next_offset_val = None
+    if isinstance(data, dict) and "next_offset" in data:
+        next_offset_val = data["next_offset"]
+
+    max_chars, max_bytes = get_client_limits(client_name)
+
+    # 초기 페이로드 빌드
+    read_guide = None
+    payload = _build_response_payload(data, is_complete, why, instruction, warning,
+                                      count_val, total_val, next_offset_val, read_guide=None)
     text_out = json.dumps(payload, ensure_ascii=False, indent=2)
+    text_out_bytes = text_out.encode("utf-8")
 
-    # 60,000자 초과 절단 방어 (MCP 계층의 절단도 불완전이다)
-    if len(text_out) > MAX_TEXT_LENGTH:
-        why = "응답 크기(%d자)가 상한 %s자를 초과하여 앞부분만 절단했습니다." % (
-            len(text_out), format(MAX_TEXT_LENGTH, ",d"))
-        if payload.get("why"):
-            # 사유 자체가 길면 뼈대만으로 상한을 넘는다 - 사유도 자른다.
-            why = str(payload["why"])[:4000] + " | " + why
-        # 잘라 낸 원문을 다시 JSON 문자열에 넣으면 따옴표·역슬래시가 이스케이프돼
-        # 길이가 불어난다(따옴표 3만 개 -> 11만 자, 판독 재현). 상한 안에 들 때까지 줄인다.
-        keep = MAX_TEXT_LENGTH
+    # 3,800바이트 초과 시 읽기안내 추가
+    if len(text_out_bytes) > READ_GUIDE_THRESHOLD_BYTES:
+        read_guide = READ_GUIDE_TEXT
+        payload = _build_response_payload(data, is_complete, why, instruction, warning,
+                                          count_val, total_val, next_offset_val, read_guide=read_guide)
+        text_out = json.dumps(payload, ensure_ascii=False, indent=2)
+        text_out_bytes = text_out.encode("utf-8")
+
+    # 상한 이내이면 바로 반환
+    if len(text_out) <= max_chars and len(text_out_bytes) <= max_bytes:
+        return text_out
+
+    # --- 예산에 맞춰 담기 (상한 초과 시) ---
+    is_complete = False
+    instruction = INSTRUCTION_INCOMPLETE
+
+    # 사전 단계: 긴 문자열 축소 및 why 문구 생성
+    str_trunc_records = _truncate_long_strings_in_obj(data, max_str_len=150)
+    str_trunc_msg = _format_str_trunc_msg(str_trunc_records)
+
+    list_entries, tool_type = _collect_body_lists(data)
+    is_paged = tool_type in ("tree", "term")
+    counts_shrink_msg = None
+
+    _sync_headers_and_dependent_data(data, tool_type, list_entries)
+
+    cur_count = _compute_count(data)
+    cur_why, cur_next_offset = _compute_current_why_and_next_offset(
+        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+    )
+    if isinstance(data, dict):
+        data["why"] = cur_why
+        data["complete"] = False
+        if cur_next_offset is not None:
+            data["next_offset"] = cur_next_offset
+
+    temp_next_offset = cur_next_offset if cur_next_offset is not None else (data.get("next_offset") if isinstance(data, dict) else None)
+    temp_payload_no_guide = _build_response_payload(
+        data, False, cur_why, instruction, warning,
+        cur_count, total_val, temp_next_offset, read_guide=None
+    )
+    t_no_guide = json.dumps(temp_payload_no_guide, ensure_ascii=False, indent=2)
+    t_bytes_no_guide = t_no_guide.encode("utf-8")
+    read_guide = READ_GUIDE_TEXT if len(t_bytes_no_guide) > READ_GUIDE_THRESHOLD_BYTES else None
+
+    temp_payload = _build_response_payload(
+        data, False, cur_why, instruction, warning,
+        cur_count, total_val, temp_next_offset, read_guide=read_guide
+    )
+    temp_text = json.dumps(temp_payload, ensure_ascii=False, indent=2)
+    temp_bytes = temp_text.encode("utf-8")
+
+    if len(temp_text) <= max_chars and len(temp_bytes) <= max_bytes:
+        text_out = temp_text
+        text_out_bytes = temp_bytes
+    else:
+        # 본 단계: 가장 큰 목록부터 항목 수를 줄여(이진 탐색)
+        processed = set()
         while True:
-            cut_payload = {"complete": False, "why": why,
-                           "지시": INSTRUCTION_INCOMPLETE, "partial": text_out[:keep]}
-            if kit.client.is_demo_key():
-                cut_payload["경고"] = DEMO_WARNING
-            cut_text = json.dumps(cut_payload, ensure_ascii=False, indent=2)
-            if len(cut_text) <= MAX_TEXT_LENGTH or keep == 0:
+            active = [e for e in list_entries if len(e.current_items) > 0 and e not in processed]
+            if not active:
                 break
-            # 이스케이프로 불어난 비율만큼 줄인다. 차이만큼 빼면 두 배로
-            # 불어난 경우 0 까지 깎여 알맹이가 사라진다(실측 240자).
-            keep = max(0, int(keep * MAX_TEXT_LENGTH / len(cut_text)) - 64)
+            active.sort(key=lambda e: len(e.current_items), reverse=True)
+            target = active[0]
+            processed.add(target)
+
+            low = 1 if is_paged else 0
+            high = len(target.current_items)
+            best_k = 0
+
+            def _test_k(k):
+                target.container[target.key] = target.orig_items[:k]
+                target.current_items = target.orig_items[:k]
+                if not is_paged:
+                    omitted_k = len(target.orig_items) - k
+                    if omitted_k > 0:
+                        target.container["생략"] = omitted_k
+                    else:
+                        target.container.pop("생략", None)
+                _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg)
+                t_count = _compute_count(data)
+                t_why, t_next = _compute_current_why_and_next_offset(
+                    data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+                )
+                if isinstance(data, dict):
+                    data["why"] = t_why
+                    data["complete"] = False
+                    if t_next is not None:
+                        data["next_offset"] = t_next
+
+                # read_guide 여부 체크
+                p_chk = _build_response_payload(
+                    data, False, t_why, instruction, warning,
+                    t_count, total_val, t_next, read_guide=None
+                )
+                txt_chk = json.dumps(p_chk, ensure_ascii=False, indent=2)
+                b_chk = txt_chk.encode("utf-8")
+                rg = READ_GUIDE_TEXT if len(b_chk) > READ_GUIDE_THRESHOLD_BYTES else None
+                if rg:
+                    p_chk = _build_response_payload(
+                        data, False, t_why, instruction, warning,
+                        t_count, total_val, t_next, read_guide=rg
+                    )
+                    txt_chk = json.dumps(p_chk, ensure_ascii=False, indent=2)
+                    b_chk = txt_chk.encode("utf-8")
+                return (len(txt_chk) <= max_chars and len(b_chk) <= max_bytes), txt_chk, b_chk
+
+            while low <= high:
+                mid = (low + high) // 2
+                fits, _, _ = _test_k(mid)
+                if fits:
+                    best_k = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            # 규칙 (다) & (가): is_paged 이고 원래 항목이 있었는데 best_k == 0 인 경우
+            if is_paged and best_k == 0 and len(target.orig_items) > 0:
+                # (다) 머리의 counts 가 너무 커서 몸통이 0건이 되면 counts 를 상위 20개 + "그 밖 N개 법령" 으로 줄인다
+                if not counts_shrink_msg:
+                    shrunk, cmsg = _shrink_counts_if_needed(data)
+                    if shrunk:
+                        counts_shrink_msg = cmsg
+                        # counts 축소 후 다시 탐색
+                        low = 1
+                        high = len(target.orig_items)
+                        while low <= high:
+                            mid = (low + high) // 2
+                            fits, _, _ = _test_k(mid)
+                            if fits:
+                                best_k = mid
+                                low = mid + 1
+                            else:
+                                high = mid - 1
+
+                # (가) 여전히 1건도 안 들어가면 그 항목의 긴 문자열을 먼저 줄인다("…(N자 생략)" + complete:false)
+                if best_k == 0:
+                    best_k = 1
+                    for max_l in (100, 50, 20, 10, 5):
+                        _truncate_single_item(target.orig_items[0], max_str_len=max_l)
+                        fits, _, _ = _test_k(1)
+                        if fits:
+                            break
+
+            target.container[target.key] = target.orig_items[:best_k]
+            target.current_items = target.orig_items[:best_k]
+            if not is_paged:
+                omitted_final = len(target.orig_items) - best_k
+                if omitted_final > 0:
+                    target.container["생략"] = omitted_final
+                else:
+                    target.container.pop("생략", None)
+            _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg)
+
+            cur_count = _compute_count(data)
+            cur_why, cur_next_offset = _compute_current_why_and_next_offset(
+                data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+            )
+            if isinstance(data, dict):
+                data["why"] = cur_why
+                data["complete"] = False
+                if cur_next_offset is not None:
+                    data["next_offset"] = cur_next_offset
+
+            chk_payload = _build_response_payload(
+                data, False, cur_why, instruction, warning,
+                cur_count, total_val, cur_next_offset, read_guide=None
+            )
+            chk_text = json.dumps(chk_payload, ensure_ascii=False, indent=2)
+            chk_bytes = chk_text.encode("utf-8")
+            read_guide = READ_GUIDE_TEXT if len(chk_bytes) > READ_GUIDE_THRESHOLD_BYTES else None
+            if read_guide:
+                chk_payload = _build_response_payload(
+                    data, False, cur_why, instruction, warning,
+                    cur_count, total_val, cur_next_offset, read_guide=read_guide
+                )
+                chk_text = json.dumps(chk_payload, ensure_ascii=False, indent=2)
+                chk_bytes = chk_text.encode("utf-8")
+
+            if len(chk_text) <= max_chars and len(chk_bytes) <= max_bytes:
+                break
+
+    # 최종 메타데이터 및 생략 정보 반영
+    if not is_paged:
+        for e in list_entries:
+            omitted = len(e.orig_items) - len(e.current_items)
+            if omitted > 0:
+                e.container["생략"] = omitted
+
+    _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg)
+
+    final_why, final_next_offset = _compute_current_why_and_next_offset(
+        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+    )
+    if isinstance(data, dict):
+        data["why"] = final_why
+        data["complete"] = False
+        if final_next_offset is not None:
+            data["next_offset"] = final_next_offset
+
+    count_val = _compute_count(data)
+
+    final_payload = _build_response_payload(
+        data, False, final_why, instruction, warning,
+        count_val, total_val, final_next_offset, read_guide=None
+    )
+    text_out = json.dumps(final_payload, ensure_ascii=False, indent=2)
+    text_out_bytes = text_out.encode("utf-8")
+
+    if len(text_out_bytes) > READ_GUIDE_THRESHOLD_BYTES:
+        read_guide = READ_GUIDE_TEXT
+        final_payload = _build_response_payload(
+            data, False, final_why, instruction, warning,
+            count_val, total_val, final_next_offset, read_guide=read_guide
+        )
+        text_out = json.dumps(final_payload, ensure_ascii=False, indent=2)
+        text_out_bytes = text_out.encode("utf-8")
+    else:
+        read_guide = None
+
+    # 3. 머리만으로도 상한을 넘으면 그때만 지금의 문자열 절단을 쓴다.
+    if len(text_out) > max_chars or len(text_out_bytes) > max_bytes:
+        cut_why = "응답이 이 클라이언트 상한 %d자/%d바이트를 넘어 잘랐다 - offset/limit 또는 law 필터로 좁혀라" % (
+            max_chars, max_bytes)
+        if final_why:
+            cut_why = final_why[:4000] + " | " + cut_why
+        keep = min(len(text_out), max_chars, max_bytes)
+        while True:
+            cut_payload = {}
+            cut_payload["complete"] = False
+            if read_guide:
+                cut_payload["읽기안내"] = read_guide
+            cut_payload["why"] = cut_why
+            cut_payload["지시"] = INSTRUCTION_INCOMPLETE
+            if warning:
+                cut_payload["경고"] = warning
+            cut_payload["count"] = count_val
+            if total_val is not None:
+                cut_payload["total"] = total_val
+            cut_payload["partial"] = text_out[:keep]
+            cut_payload["_end"] = {
+                "complete": False,
+                "count": count_val
+            }
+            cut_text = json.dumps(cut_payload, ensure_ascii=False, indent=2)
+            cut_bytes = cut_text.encode("utf-8")
+            if (len(cut_text) <= max_chars and len(cut_bytes) <= max_bytes) or keep == 0:
+                break
+            ratio_c = max_chars / len(cut_text) if len(cut_text) > max_chars else 1.0
+            ratio_b = max_bytes / len(cut_bytes) if len(cut_bytes) > max_bytes else 1.0
+            ratio = min(ratio_c, ratio_b)
+            step = max(0, int(keep * ratio) - 64)
+            if step >= keep:
+                step = max(0, keep - 64)
+            keep = step
         text_out = cut_text
+
+    # 3,800바이트 기준 최종 안내문 정합성 동기화
+    final_bytes_len = len(text_out.encode("utf-8"))
+    if final_bytes_len > READ_GUIDE_THRESHOLD_BYTES and '"읽기안내"' not in text_out[:200]:
+        try:
+            parsed_final = json.loads(text_out)
+            reordered = {}
+            for k, v in parsed_final.items():
+                reordered[k] = v
+                if k == "complete":
+                    reordered["읽기안내"] = READ_GUIDE_TEXT
+            text_out = json.dumps(reordered, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    elif final_bytes_len <= READ_GUIDE_THRESHOLD_BYTES and '"읽기안내"' in text_out:
+        try:
+            parsed_final = json.loads(text_out)
+            if "읽기안내" in parsed_final:
+                del parsed_final["읽기안내"]
+                text_out = json.dumps(parsed_final, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     return text_out
 
@@ -346,7 +1169,7 @@ def _validate_paging(offset, limit):
             raise ValueError("offset 은 0 이상의 정수여야 한다")
 
     if limit is None:
-        lim = 200
+        lim = 50
     else:
         if isinstance(limit, bool):
             raise ValueError("limit 은 1 이상의 정수여야 한다")
@@ -454,7 +1277,7 @@ def dispatch_tool(name, args):
         with_text = bool(args.get("with_text", False))
         found = kit.terms.articles(term)
         # 통째로 주면 흔한 낱말(예: 건폐율)은 응답이 14만 자라 6만 자 상한에 잘린다(실측).
-        # 기본 200건씩 잘라 total·next_offset 으로 이어 읽게 한다.
+        # 기본 50건씩 잘라 total·next_offset 으로 이어 읽게 한다.
         missed = []
         _walk(found, missed, "")      # 판정은 요약이 아니라 원래 결과 전체로
         raw_articles = found.partial("articles") if hasattr(found, "partial") else dict.get(found, "articles")
@@ -485,6 +1308,7 @@ def dispatch_tool(name, args):
                 row.pop("조문내용", None)
             articles_out.append(row)
 
+        offset_val, _ = _validate_paging(args.get("offset"), args.get("limit"))
         total, paged_articles, next_offset, is_complete = _apply_pagination(
             articles_out, args.get("offset"), args.get("limit"), missed
         )
@@ -496,6 +1320,7 @@ def dispatch_tool(name, args):
             "term": term,
             "found": is_found,
             "total": total,
+            "offset": offset_val,
             "next_offset": next_offset,
             "complete": is_complete,
             "why": " | ".join(dict.fromkeys(missed)),
@@ -517,12 +1342,26 @@ def dispatch_tool(name, args):
         law = args.get("law") or args.get("law_name")
         found = kit.tree.delegated(law)
         # 통째로 주면 주차장법 하나가 387만 자다(조례 4,839행, 실측) - 상한에
-        # 잘려 앞부분만 남는다. 기본 200행씩 잘라 total·next_offset 으로 이어 읽게 한다.
-        missed = []
-        _walk(found, missed, "")      # 판정은 요약이 아니라 원래 결과 전체로
+        # 잘려 앞부분만 남는다. 기본 50행씩 잘라 total·next_offset 으로 이어 읽게 한다.
+        tree_missed = []
+        _walk(found, tree_missed, "")      # 판정은 요약이 아니라 원래 결과 전체로
 
         raw_rows = found.partial("rows") if hasattr(found, "partial") else dict.get(found, "rows")
         raw_rows = raw_rows or []
+
+        # 법령체계: {시행령: [이름...], 시행규칙: [이름...], 위임행정규칙: [이름...]} 전부 포함 (이어 읽기와 무관)
+        hierarchy = {"시행령": [], "시행규칙": [], "위임행정규칙": []}
+        for kind in ("시행령", "시행규칙", "위임행정규칙"):
+            seen_h = set()
+            names_h = []
+            for r in raw_rows:
+                if isinstance(r, dict) and r.get("위임구분") == kind:
+                    target = r.get("대상법령")
+                    if target and target not in seen_h:
+                        seen_h.add(target)
+                        names_h.append(target)
+            hierarchy[kind] = names_h
+
         group, contains = args.get("group"), args.get("contains")
         filtered_rows = [
             r for r in raw_rows
@@ -530,19 +1369,40 @@ def dispatch_tool(name, args):
             and (not contains or contains in str(r.get("대상법령", "")))
         ]
 
+        offset_val, _ = _validate_paging(args.get("offset"), args.get("limit"))
+        paging_missed = []
         total, paged_rows, next_offset, is_complete = _apply_pagination(
-            filtered_rows, args.get("offset"), args.get("limit"), missed
+            filtered_rows, args.get("offset"), args.get("limit"), paging_missed
         )
+
+        missed = list(tree_missed)
+        if paging_missed:
+            missed.extend(paging_missed)
+            missed.append("법령체계(시행령·시행규칙·행정규칙)는 이 응답에 모두 들어 있다. 잘린 것은 조례 목록뿐")
+
+        # 자치법규(조례) 이름 목록 (paged_rows 에서 추출)
+        paged_ordinances = []
+        seen_ord = set()
+        for r in paged_rows:
+            if isinstance(r, dict):
+                kind = r.get("위임구분") or ""
+                if "자치법규" in kind or "조례" in kind:
+                    target = r.get("대상법령")
+                    if target and target not in seen_ord:
+                        seen_ord.add(target)
+                        paged_ordinances.append(target)
 
         out = {
             "law": law,
             "total": total,
+            "offset": offset_val,
             "next_offset": next_offset,
             "complete": is_complete,
             "why": " | ".join(dict.fromkeys(missed)),
             "note": dict.get(found, "note", ""),
             "counts": kit.tree.summary(found),
-            "하위법령": kit.tree.subordinate_laws(found),
+            "법령체계": hierarchy,
+            "조례": paged_ordinances,
             "rows": paged_rows,
         }
         return out
@@ -563,7 +1423,29 @@ def dispatch_tool(name, args):
     elif name == "law_search":
         query = args.get("query") or args.get("topic")
         display = args.get("display", 20)
-        return kit.search.across(query, display=display)
+        found = kit.search.across(query, display=display)
+        axes = found.get("axes", {})
+        axes_summary = {}
+        for target, ax in axes.items():
+            label = ax.get("label") or target
+            t_val = ax.get("total")
+            if t_val is not None:
+                try:
+                    t_val = int(t_val)
+                except (ValueError, TypeError):
+                    pass
+            m_val = len(ax.get("items") or []) if ax.get("items") is not None else ax.get("count", 0)
+            axes_summary[label] = {
+                "complete": bool(ax.get("complete", False)),
+                "total": t_val,
+                "받은": m_val,
+            }
+        return {
+            "축별": axes_summary,
+            "query": found.get("query", query),
+            "axes": axes,
+            "incomplete": found.get("incomplete", []),
+        }
     elif name == "law_api":
         target = args.get("target")
         query = args.get("query")
@@ -598,6 +1480,26 @@ def _log(text):
     sys.stderr.flush()
 
 
+def _log_client_to_cache(name, version):
+    """initialize 시 수신한 clientInfo(name, version)와 시각을 캐시 폴더의 clients.log 에 덧붙인다.
+
+    실패해도 서버는 계속 동작해야 한다.
+    """
+    try:
+        import datetime
+        cache_dir = getattr(kit.client, "CACHE_DIR", None)
+        if not cache_dir:
+            cache_dir = os.path.expanduser(os.path.join("~", ".cache", "korea-law-kit"))
+        os.makedirs(cache_dir, exist_ok=True)
+        log_path = os.path.join(cache_dir, "clients.log")
+        now_str = datetime.datetime.now().isoformat()
+        line = "%s\t%s\t%s\n" % (now_str, name, version)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def handle_message(req, writer):
     """단일 JSON-RPC 메시지를 처리한다."""
     if not isinstance(req, dict):
@@ -611,6 +1513,14 @@ def handle_message(req, writer):
     is_notification = msg_id is None
 
     if method == "initialize":
+        client_info = params.get("clientInfo") or {}
+        client_name = str(client_info.get("name") or "")
+        client_version = str(client_info.get("version") or "")
+        CURRENT_CLIENT["name"] = client_name
+        CURRENT_CLIENT["version"] = client_version
+        _log("client: %s %s" % (client_name, client_version))
+        _log_client_to_cache(client_name, client_version)
+
         client_proto = params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION
         resp = {
             "jsonrpc": "2.0",

@@ -55,9 +55,29 @@ python D:\...\korea-law-kit\korea_law_mcp.py
 | `law_api` | 설명서 195건 검색 |
 | `law_call` | 아무 target 직접 |
 
-결과가 조금이라도 불완전하면 — 어느 깊이에 있든, 응답이 60,000자에서
+결과가 조금이라도 불완전하면 — 어느 깊이에 있든, 응답이 클라이언트 상한에서
 잘렸든 — 최상위에 `"complete": false`, `why`, `지시` 가 붙고 받은 만큼은
 `partial` 에 들어간다. 모델에게 "없다고 답하지 마라" 를 문장으로 돌려준다.
+
+### 클라이언트별 응답 상한
+
+에이전트마다 도구 응답 수신 한계가 달라, `initialize` 시 수신한 클라이언트 이름(소문자·앞뒤 공백 제거 후 **완전 일치**)에 맞춰 근거가 확인된 조사값의 약 80% 수준으로 글자 수와 UTF-8 바이트 수 상한을 동적으로 적용한다. 부분 일치는 허용하지 않으므로 이름이 틀리거나 미등재된 경우 가장 보수적인 기본값(6,000자, 16,000바이트)이 적용되어 안전하다. `initialize` 시 전달된 `clientInfo`의 name·version과 접속 시각은 캐시 폴더(`client.CACHE_DIR`) 아래 `clients.log`에 자동 기록된다.
+
+| 클라이언트 (완전 일치) | 최대 글자 | 최대 UTF-8 바이트 | 조사 근거 (약 80%) |
+|---|---|---|---|
+| `claude-code`, `claude` | 50,000자 | 150,000바이트 | Claude Code 25,000토큰 |
+| `codex`, `codex-mcp-client` | 20,000자 | 60,000바이트 | OpenAI Codex 10,000토큰 |
+| `copilot` | 7,000자 | 16,000바이트 | GitHub Copilot 20,480바이트 |
+| `omo`, `senpi` | 15,000자 | 40,000바이트 | OmO·senpi 51,200바이트 |
+| `kiro` | 20,000자 | 60,000바이트 | kiro 25,000자 |
+| `hermes` | 40,000자 | 120,000바이트 | hermes 50,000자 |
+| `gemini-cli`, `gemini` | 32,000자 | 96,000바이트 | Gemini CLI 40,000자 |
+| `grok` | 6,000자 | 16,000바이트 | grok 20,000바이트 |
+| 기본값 (미등재 / 기타) | 6,000자 | 16,000바이트 | agy, Antigravity, cline, openclaude 등 |
+
+상한 사용자 조정 환경변수:
+- `KOREA_LAW_MCP_MAX_CHARS`: 최대 글자 수 강제 지정 (클라이언트 기본값보다 우선)
+- `KOREA_LAW_MCP_MAX_BYTES`: 최대 UTF-8 바이트 수 강제 지정 (클라이언트 기본값보다 우선)
 
 인증키는 `LAW_API_OC` 환경변수로 준다(옛 이름 `NATIONAL_LAW_API_OC` 도
 읽는다). 프로세스 환경에 없으면 Windows 사용자 환경변수(레지스트리)를
