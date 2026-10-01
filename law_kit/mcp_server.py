@@ -2,7 +2,7 @@
 """표준 라이브러리만 쓰는 stdio 기반 국가법령 MCP 서버.
 
 외부 패키지(`mcp` 패키지 포함) 없이 오직 파이썬 표준 라이브러리만으로
-JSON-RPC 2.0 프로토콜을 구현해 국가법령 도구 9종을 제공한다.
+JSON-RPC 2.0 프로토콜을 구현해 국가법령 도구 11종을 제공한다.
 `python -m law_kit.mcp_server` 로 직접 띄워 사용한다.
 
 왜 표준 라이브러리만 쓰나:
@@ -141,7 +141,7 @@ def get_client_limits(client_name=None):
     return max_chars, max_bytes
 
 
-#: MCP 도구 9종 명세 정의
+#: MCP 도구 11종 명세 정의
 TOOLS = [
     {
         "name": "law_brief",
@@ -255,6 +255,31 @@ TOOLS = [
                 "params": {"type": "object", "description": "API에 전달할 추가 쿼리 파라미터 딕셔너리"}
             },
             "required": ["target"]
+        }
+    },
+    {
+        "name": "law_article",
+        "description": "특정 조문은 law_search 말고 law_article. 법령의 특정 조문(항·호 포함)을 법제처 JO 6자리 코드로 정밀 조회한다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "law": {"type": "string", "description": "법령명, 약칭, 구법명 또는 MST 일련번호"},
+                "jo": {"type": "string", "description": "조 번호 (예: '제84조', '84', '제40조의3', '40의3')"},
+                "hang": {"type": "string", "description": "선택적 항 번호 (예: '1', '①', '제1항')"}
+            },
+            "required": ["law", "jo"]
+        }
+    },
+    {
+        "name": "law_annex_text",
+        "description": "별표 내용은 law_annex_text. 법령에 딸린 특정 별표나 서식의 본문 텍스트 내용을 직접 조회한다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "law": {"type": "string", "description": "법령명 또는 MST 일련번호"},
+                "annex": {"type": "string", "description": "별표 번호 (예: '1', '별표 2', '2의3')"}
+            },
+            "required": ["law", "annex"]
         }
     }
 ]
@@ -1177,8 +1202,9 @@ def dispatch_tool(name, args):
     spec = next((t for t in TOOLS if t["name"] == name), None)
     if spec is not None:
         # 아래 분기가 받아 주는 별칭도 필수 인자로 인정한다(판독 반례).
-        aliases = {"term": ("word",), "law": ("law_name",), "law_name": ("law",),
-                   "name": ("law_name",), "query": ("topic",)}
+        aliases = {"term": ("word",), "law": ("law_name", "name"), "law_name": ("law", "name"),
+                   "name": ("law_name", "law"), "query": ("topic",), "jo": ("article",),
+                   "annex": ("annex_no",)}
         missing = [k for k in spec.get("inputSchema", {}).get("required", [])
                    if all(args.get(a) in (None, "") for a in (k,) + aliases.get(k, ()))]
         if missing:
@@ -1410,6 +1436,15 @@ def dispatch_tool(name, args):
         call_params = dict(params)
         call_params.update(extra)
         return kit.client.call(target, service=service, **call_params)
+    elif name == "law_article":
+        law = args.get("law") or args.get("law_name") or args.get("name")
+        jo = args.get("jo") or args.get("article")
+        hang = args.get("hang")
+        return kit.articles.get_article(law, jo, hang=hang)
+    elif name == "law_annex_text":
+        law = args.get("law") or args.get("law_name") or args.get("name")
+        annex_no = args.get("annex") or args.get("annex_no")
+        return kit.articles.get_annex_text(law, annex_no)
     else:
         raise ValueError("알 수 없는 도구입니다: %s" % name)
 

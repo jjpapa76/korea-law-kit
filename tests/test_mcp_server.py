@@ -87,20 +87,21 @@ def test_initialize_response():
     assert res_default["result"]["protocolVersion"] == "2025-06-18"
 
 
-# ---------------------------------------------------------------- 2. tools/list 9개
-def test_tools_list_has_9_tools():
-    """도구 9종이 누락 없이 등록되어 있고 적절한 설명을 갖추었는지 확인한다."""
+# ---------------------------------------------------------------- 2. tools/list 11개
+def test_tools_list_has_11_tools():
+    """도구 11종이 누락 없이 등록되어 있고 적절한 설명을 갖추었는지 확인한다."""
     writer = BufferWriter()
     req = {"jsonrpc": "2.0", "id": 10, "method": "tools/list"}
     mcp_server.handle_message(req, writer)
     responses = writer.get_json_lines()
     assert len(responses) == 1
     tools = responses[0]["result"]["tools"]
-    assert len(tools) == 9
+    assert len(tools) == 11
 
     expected_names = {
         "law_brief", "law_find", "law_term", "law_tree", "law_annex",
-        "law_history", "law_search", "law_api", "law_call"
+        "law_history", "law_search", "law_api", "law_call",
+        "law_article", "law_annex_text"
     }
     actual_names = {t["name"] for t in tools}
     assert actual_names == expected_names
@@ -112,6 +113,14 @@ def test_tools_list_has_9_tools():
     # law_annex 설명에 내려받기 없음이 명시되었는지 확인
     law_annex_tool = next(t for t in tools if t["name"] == "law_annex")
     assert "내려받기는 없음" in law_annex_tool["description"]
+
+    # law_article 설명 확인
+    law_article_tool = next(t for t in tools if t["name"] == "law_article")
+    assert "특정 조문은 law_search 말고 law_article" in law_article_tool["description"]
+
+    # law_annex_text 설명 확인
+    law_annex_text_tool = next(t for t in tools if t["name"] == "law_annex_text")
+    assert "별표 내용은 law_annex_text" in law_annex_text_tool["description"]
 
 
 # ---------------------------------------------------------------- 3. 불완전 결과
@@ -397,7 +406,7 @@ def test_subprocess_mcp_server_roundtrip():
         tools_resp = json.loads(tools_resp_line)
         assert tools_resp["id"] == 2
         tools = tools_resp["result"]["tools"]
-        assert len(tools) == 9
+        assert len(tools) == 11
         # 한글 설명이 정상적으로 전송되었는지 검증
         brief_tool = next(t for t in tools if t["name"] == "law_brief")
         assert "주제 하나를" in brief_tool["description"]
@@ -1068,8 +1077,8 @@ def _call_raw_text(name, arguments):
     return writer.get_json_lines()[0]["result"]["content"][0]["text"]
 
 
-def test_header_first_keys_and_end_tail_9_tools(monkeypatch):
-    """도구 9종 각각에 대해 'complete' 가 처음 64자 안에 나오고 _end 꼬리가 붙는지 검증한다."""
+def test_header_first_keys_and_end_tail_11_tools(monkeypatch):
+    """도구 11종 각각에 대해 'complete' 가 처음 64자 안에 나오고 _end 꼬리가 붙는지 검증한다."""
     # 1. law_brief
     monkeypatch.setattr(kit, "brief", lambda *a, **k: {
         "topic": "소음",
@@ -1133,6 +1142,16 @@ def test_header_first_keys_and_end_tail_9_tools(monkeypatch):
         "law", ok=True, items=[{"법령명": "테스트1"}, {"법령명": "테스트2"}], total=2
     ))
 
+    # 10. law_article & 11. law_annex_text
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "jo": "제1조", "complete": True,
+        "조번호": "제1조", "조문제목": "목적", "조문내용": "내용", "항": [], "호": []
+    })
+    monkeypatch.setattr(kit.articles, "get_annex_text", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "annex": "1", "complete": True,
+        "별표번호": "0001", "별표제목": "별표1", "별표내용": "내용"
+    })
+
     tool_calls = [
         ("law_brief", {"topic": "소음"}),
         ("law_find", {"name": "소음"}),
@@ -1143,6 +1162,8 @@ def test_header_first_keys_and_end_tail_9_tools(monkeypatch):
         ("law_search", {"query": "소음"}),
         ("law_api", {"query": "법령"}),
         ("law_call", {"target": "law"}),
+        ("law_article", {"law": "건축법", "jo": "제1조"}),
+        ("law_annex_text", {"law": "건축법", "annex": "1"}),
     ]
 
     for name, args in tool_calls:
