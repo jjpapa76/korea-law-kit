@@ -54,41 +54,17 @@ DEMO_WARNING = (
 
 #: 근거가 확인된 클라이언트별 (최대 글자 수, 최대 UTF-8 바이트 수) 표.
 #: 대소문자 무시 및 앞뒤 공백 제거 후 완전 일치만 적용한다.
-#: 실제 clientInfo.name 은 아직 모른다 - 표의 키는 후보 이름들을 넣되
-#: (예: "claude-code", "codex-mcp-client", "copilot", ...),
-#: 이름이 틀려도 기본값(가장 작은 쪽)으로 떨어지므로 안전하다.
-#: agy·Antigravity·cline·openclaude 등은 표에 넣지 않는다(기본값 적용).
+#: 2026-10-01 clients.log 로 수집된 실제 clientInfo.name 만 반영한다.
+#: antigravity-client, agy, cline, openclaude 등은 표에 넣지 않는다(기본값 적용).
 CLIENT_LIMITS_TABLE = {
     # Claude Code (조사값 25,000토큰의 약 80%)
     "claude-code": (50000, 150000),
-    "claude_code": (50000, 150000),
-    "claudecode": (50000, 150000),
-    "claude": (50000, 150000),
-    "claude-desktop": (50000, 150000),
     # OpenAI Codex (조사값 10,000토큰의 약 80%)
-    "codex": (20000, 60000),
     "codex-mcp-client": (20000, 60000),
-    "codex-cli": (20000, 60000),
-    # GitHub Copilot (조사값 20,480바이트의 약 80%)
-    "copilot": (7000, 16000),
-    "github-copilot": (7000, 16000),
-    "copilot-chat": (7000, 16000),
     # OmO · senpi (조사값 51,200바이트의 약 80%)
-    "omo": (15000, 40000),
-    "senpi": (15000, 40000),
-    # Kiro (조사값 25,000자의 약 80%)
-    "kiro": (20000, 60000),
-    "kiro-cli": (20000, 60000),
-    # Hermes (조사값 50,000자의 약 80%)
-    "hermes": (40000, 120000),
-    "hermes-agent": (40000, 120000),
-    # Gemini CLI (조사값 40,000자의 약 80%)
-    "gemini-cli": (32000, 96000),
-    "gemini": (32000, 96000),
+    "senpi-mcp-client": (15000, 40000),
     # Grok (조사값 20,000바이트의 약 80%)
-    "grok": (6000, 16000),
-    "grok-cli": (6000, 16000),
-    "grok-agent": (6000, 16000),
+    "grok-shell-korea-law": (6000, 16000),
 }
 
 #: 모르는 이름이거나 이름이 없을 때의 기본 상한 (가장 작은 쪽)

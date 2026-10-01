@@ -232,7 +232,11 @@ def update_toml_file(label, path, py_path, launcher_path, extra="", dry=False):
         say("%-14s 수동 확인 필요: %s - 알아볼 수 없는 korea-law 항목이 있다" % (label, path))
         return False
 
-    extra_part = (newline + extra.strip() if extra.strip() else "")
+    if extra.strip():
+        extra_formatted = extra.strip().replace("\r\n", "\n").replace("\n", newline)
+        extra_part = newline + extra_formatted
+    else:
+        extra_part = ""
     block = "%s[mcp_servers.korea-law]%scommand = '%s'%sargs = ['%s']%s%s" % (
         newline, newline, py_path, newline, launcher_path, extra_part, newline
     )
@@ -482,7 +486,7 @@ def install(py=None, apply=False):
         codex_homes += glob.glob(os.path.join(appdata, "orca", "codex-runtime-home", "home"))
     for ch in codex_homes:
         update_toml_file("codex", os.path.join(ch, "config.toml"), py, LAUNCHER,
-                         extra='default_tools_approval_mode = "approve"', dry=dry)
+                         extra='default_tools_approval_mode = "approve"\nstartup_timeout_sec = 60', dry=dry)
         if block_template:
             update_instruction_block("codex", os.path.join(ch, "AGENTS.md"), block_template, REPO, dry=dry)
 
@@ -552,7 +556,16 @@ def install(py=None, apply=False):
     update_json_file(
         "OmO",
         os.path.join(omo_agent_dir, "mcp.json"),
-        lambda d: d.setdefault("mcpServers", {}).__setitem__(NAME, {"command": py, "args": [LAUNCHER]}),
+        lambda d: d.setdefault("mcpServers", {}).__setitem__(
+            NAME,
+            {
+                "command": py,
+                "args": [LAUNCHER],
+                "connectTimeoutMs": 60000,
+                "startupTimeoutMs": 60000,
+                "lifecycle": "keep-alive",
+            }
+        ),
         dry=dry,
         create_if_missing=True
     )

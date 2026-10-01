@@ -168,6 +168,8 @@ def test_install_agents_apply_and_idempotency(mock_agent_env, capsys):
     codex_text = env["codex_conf"].read_text(encoding="utf-8")
     assert codex_text.count("[mcp_servers.korea-law]") == 1
     assert 'default_tools_approval_mode = "approve"' in codex_text
+    assert "startup_timeout_sec = 60" in codex_text
+    assert codex_text.count("startup_timeout_sec = 60") == 1
 
     # 2. grok config.toml 검증: [mcp_servers.korea-law] 가 정확히 1개
     grok_text = env["grok_conf"].read_text(encoding="utf-8")
@@ -195,6 +197,13 @@ def test_install_agents_apply_and_idempotency(mock_agent_env, capsys):
     # 6. cline_mcp_settings.json 검증
     cline_data = json.loads(env["cline_conf"].read_text(encoding="utf-8"))
     assert "korea-law" in cline_data["mcpServers"]
+
+    # 7. 근거 없는 클라이언트에는 추가 키 없음 검증
+    for non_target_client in [openclaw_data["mcp"]["servers"]["korea-law"], cline_data["mcpServers"]["korea-law"]]:
+        assert "connectTimeoutMs" not in non_target_client
+        assert "startupTimeoutMs" not in non_target_client
+        assert "lifecycle" not in non_target_client
+        assert "startup_timeout_sec" not in non_target_client
 
     # pi(OmO) 건너뜀 미출력 확인
     captured = capsys.readouterr().out
@@ -557,6 +566,7 @@ def test_crlf_bom_preserved_after_apply_twice(tmp_path, monkeypatch):
         'command = \'python.exe\'\r\n'
         f'args = [\'{install_agents.LAUNCHER}\']\r\n'
         'default_tools_approval_mode = "approve"\r\n'
+        'startup_timeout_sec = 60\r\n'
     )
     assert korea_law_toml_block in applied_toml_text
     toml_without_korea_law = applied_toml_text.replace(korea_law_toml_block, "")
@@ -943,6 +953,9 @@ def test_antigravity_ide_and_omo_with_existing_files(tmp_path, monkeypatch):
     assert len([k for k in ag_applied["mcpServers"].keys() if k == "korea-law"]) == 1
     assert ag_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
     assert ag_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+    assert "connectTimeoutMs" not in ag_applied["mcpServers"]["korea-law"]
+    assert "startupTimeoutMs" not in ag_applied["mcpServers"]["korea-law"]
+    assert "lifecycle" not in ag_applied["mcpServers"]["korea-law"]
 
     # 검증 2: OmO (senpi)
     # (1) 백업 파일 생성 확인
@@ -958,6 +971,9 @@ def test_antigravity_ide_and_omo_with_existing_files(tmp_path, monkeypatch):
     assert len([k for k in omo_applied["mcpServers"].keys() if k == "korea-law"]) == 1
     assert omo_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
     assert omo_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+    assert omo_applied["mcpServers"]["korea-law"]["connectTimeoutMs"] == 60000
+    assert omo_applied["mcpServers"]["korea-law"]["startupTimeoutMs"] == 60000
+    assert omo_applied["mcpServers"]["korea-law"]["lifecycle"] == "keep-alive"
     # (3) 스킬 파일 복사 및 {REPO} 치환 확인
     omo_skill = omo_dir / "skills" / "korea-law" / "SKILL.md"
     assert omo_skill.exists(), "OmO 스킬 파일이 복사되지 않음"
@@ -1013,6 +1029,9 @@ def test_antigravity_ide_and_omo_without_files(tmp_path, monkeypatch):
     assert len([k for k in omo_applied["mcpServers"].keys() if k == "korea-law"]) == 1
     assert omo_applied["mcpServers"]["korea-law"]["command"] == "python.exe"
     assert omo_applied["mcpServers"]["korea-law"]["args"] == [install_agents.LAUNCHER]
+    assert omo_applied["mcpServers"]["korea-law"]["connectTimeoutMs"] == 60000
+    assert omo_applied["mcpServers"]["korea-law"]["startupTimeoutMs"] == 60000
+    assert omo_applied["mcpServers"]["korea-law"]["lifecycle"] == "keep-alive"
 
     # 검증 3: OmO 스킬 확인
     omo_skill = omo_dir / "skills" / "korea-law" / "SKILL.md"

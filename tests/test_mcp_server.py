@@ -411,7 +411,7 @@ def test_truncation_stays_under_the_cap_even_with_escapes():
     """잘라 낸 원문을 다시 JSON 에 넣으면 이스케이프로 불어난다 - 그래도 상한 안이어야 한다."""
     for data in ({"items": ['"' * 30000]}, {"items": [{"a": "b\\c"}] * 9000}):
         # 1. claude 클라이언트 (50,000자 상한) 환경
-        text_claude = mcp_server.serialize_response(data, client_name="claude")
+        text_claude = mcp_server.serialize_response(data, client_name="claude-code")
         parsed_claude = json.loads(text_claude)
         assert len(text_claude) <= 50000
         assert len(text_claude.encode("utf-8")) <= 150000
@@ -1255,28 +1255,13 @@ def test_client_limits_selection_by_name():
     """클라이언트 이름(소문자·앞뒤 공백 제거 후 완전 일치)에 따라 올바른 글자/바이트 상한이 선택된다."""
     cases = {
         "claude-code": (50000, 150000),
-        "claude_code": (50000, 150000),
-        "claudecode": (50000, 150000),
-        "claude": (50000, 150000),
-        "claude-desktop": (50000, 150000),
         "  Claude-Code  ": (50000, 150000),  # 공백 및 대소문자 무시 완전 일치
-        "codex": (20000, 60000),
         "codex-mcp-client": (20000, 60000),
-        "codex-cli": (20000, 60000),
-        "copilot": (7000, 16000),
-        "github-copilot": (7000, 16000),
-        "copilot-chat": (7000, 16000),
-        "omo": (15000, 40000),
-        "senpi": (15000, 40000),
-        "kiro": (20000, 60000),
-        "kiro-cli": (20000, 60000),
-        "hermes": (40000, 120000),
-        "hermes-agent": (40000, 120000),
-        "gemini-cli": (32000, 96000),
-        "gemini": (32000, 96000),
-        "grok": (6000, 16000),
-        "grok-cli": (6000, 16000),
-        "grok-agent": (6000, 16000),
+        "  Codex-MCP-Client  ": (20000, 60000),
+        "senpi-mcp-client": (15000, 40000),
+        "  SENPI-mcp-client  ": (15000, 40000),
+        "grok-shell-korea-law": (6000, 16000),
+        "  GROK-SHELL-korea-law  ": (6000, 16000),
     }
     for name, expected in cases.items():
         assert mcp_server.get_client_limits(name) == expected, (
@@ -1284,6 +1269,33 @@ def test_client_limits_selection_by_name():
                 name, expected, mcp_server.get_client_limits(name)
             )
         )
+
+
+def test_former_candidate_names_fall_to_default_limits():
+    """추측으로 넣었던 옛 후보 이름들은 모두 기본 상한 (6000, 16000)으로 떨어진다."""
+    former_candidates = [
+        "claude", "claude_code", "claudecode", "claude-desktop",
+        "codex", "codex-cli",
+        "copilot", "github-copilot", "copilot-chat",
+        "omo", "senpi",
+        "kiro", "kiro-cli",
+        "hermes", "hermes-agent",
+        "gemini-cli", "gemini",
+        "grok", "grok-cli", "grok-agent",
+    ]
+    for name in former_candidates:
+        assert mcp_server.get_client_limits(name) == (6000, 16000), (
+            "옛 후보 이름 '%s'가 기본값(6000, 16000)으로 떨어지지 않음: %s" % (
+                name, mcp_server.get_client_limits(name)
+            )
+        )
+
+
+def test_antigravity_client_not_in_table_and_uses_default():
+    """antigravity-client 는 표에 넣지 않고 기본값(6000, 16000)을 적용한다."""
+    assert "antigravity-client" not in mcp_server.CLIENT_LIMITS_TABLE
+    assert mcp_server.get_client_limits("antigravity-client") == (6000, 16000)
+    assert mcp_server.get_client_limits("Antigravity-Client") == (6000, 16000)
 
 
 def test_unknown_or_missing_client_name_uses_default_limits():
@@ -1296,28 +1308,28 @@ def test_env_overrides_client_limits(monkeypatch):
     """환경변수 KOREA_LAW_MCP_MAX_CHARS, KOREA_LAW_MCP_MAX_BYTES 가 있으면 최우선한다."""
     # 1. MAX_CHARS 만 오버라이드
     monkeypatch.setenv("KOREA_LAW_MCP_MAX_CHARS", "12345")
-    assert mcp_server.get_client_limits("claude") == (12345, 150000)
+    assert mcp_server.get_client_limits("claude-code") == (12345, 150000)
 
     # 2. MAX_BYTES 만 오버라이드
     monkeypatch.delenv("KOREA_LAW_MCP_MAX_CHARS", raising=False)
     monkeypatch.setenv("KOREA_LAW_MCP_MAX_BYTES", "54321")
-    assert mcp_server.get_client_limits("claude") == (50000, 54321)
+    assert mcp_server.get_client_limits("claude-code") == (50000, 54321)
 
     # 3. 둘 다 오버라이드
     monkeypatch.setenv("KOREA_LAW_MCP_MAX_CHARS", "7777")
     monkeypatch.setenv("KOREA_LAW_MCP_MAX_BYTES", "8888")
-    assert mcp_server.get_client_limits("claude") == (7777, 8888)
+    assert mcp_server.get_client_limits("claude-code") == (7777, 8888)
     assert mcp_server.get_client_limits("unknown") == (7777, 8888)
 
 
 def test_truncation_by_utf8_byte_limit_when_chars_under_limit():
     """글자 수는 상한 미만이지만 한국어 UTF-8 바이트 수가 상한을 넘는 경우 바이트 기준으로 절단된다."""
-    # copilot: (7000, 16000)
-    # 한글 5600자: 글자 수는 약 5700자(JSON 포맷 포함)로 7000자 이하이지만,
+    # grok-shell-korea-law: (6000, 16000)
+    # 한글 5600자: 글자 수는 약 5700자(JSON 포맷 포함)로 6000자 이하이지만,
     # 바이트 수는 5600*3 = 16800바이트 이상으로 16000바이트 초과!
     hangul_data = {"items": ["가" * 100 for _ in range(56)]}
-    text = mcp_server.serialize_response(hangul_data, client_name="copilot")
-    assert len(text) <= 7000
+    text = mcp_server.serialize_response(hangul_data, client_name="grok-shell-korea-law")
+    assert len(text) <= 6000
     assert len(text.encode("utf-8")) <= 16000
     parsed = json.loads(text)
     assert parsed["complete"] is False
@@ -1376,11 +1388,10 @@ def test_client_limits_exact_match_no_partial():
 
 
 def test_client_limits_default_and_grok():
-    """grok 은 (6000, 16000)을 적용받고, agy/Antigravity/cline/openclaude 등은 기본값 (6000, 16000)이다."""
+    """grok-shell-korea-law 는 (6000, 16000)을 적용받고, antigravity-client/agy/Antigravity/cline/openclaude 등은 기본값 (6000, 16000)이다."""
+    assert mcp_server.get_client_limits("grok-shell-korea-law") == (6000, 16000)
     assert mcp_server.get_client_limits("grok") == (6000, 16000)
-    assert mcp_server.get_client_limits("grok-cli") == (6000, 16000)
-    assert mcp_server.get_client_limits("grok-agent") == (6000, 16000)
-    for default_client in ("agy", "Antigravity", "antigravity", "cline", "openclaude", "unknown-client", "", None):
+    for default_client in ("antigravity-client", "Antigravity-Client", "agy", "Antigravity", "antigravity", "cline", "openclaude", "unknown-client", "", None):
         assert mcp_server.get_client_limits(default_client) == (6000, 16000)
 
 

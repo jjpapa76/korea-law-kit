@@ -65,15 +65,11 @@ python D:\...\korea-law-kit\korea_law_mcp.py
 
 | 클라이언트 (완전 일치) | 최대 글자 | 최대 UTF-8 바이트 | 조사 근거 (약 80%) |
 |---|---|---|---|
-| `claude-code`, `claude` | 50,000자 | 150,000바이트 | Claude Code 25,000토큰 |
-| `codex`, `codex-mcp-client` | 20,000자 | 60,000바이트 | OpenAI Codex 10,000토큰 |
-| `copilot` | 7,000자 | 16,000바이트 | GitHub Copilot 20,480바이트 |
-| `omo`, `senpi` | 15,000자 | 40,000바이트 | OmO·senpi 51,200바이트 |
-| `kiro` | 20,000자 | 60,000바이트 | kiro 25,000자 |
-| `hermes` | 40,000자 | 120,000바이트 | hermes 50,000자 |
-| `gemini-cli`, `gemini` | 32,000자 | 96,000바이트 | Gemini CLI 40,000자 |
-| `grok` | 6,000자 | 16,000바이트 | grok 20,000바이트 |
-| 기본값 (미등재 / 기타) | 6,000자 | 16,000바이트 | agy, Antigravity, cline, openclaude 등 |
+| `claude-code` | 50,000자 | 150,000바이트 | Claude Code 25,000토큰 |
+| `codex-mcp-client` | 20,000자 | 60,000바이트 | OpenAI Codex 10,000토큰 |
+| `senpi-mcp-client` | 15,000자 | 40,000바이트 | OmO·senpi 51,200바이트 |
+| `grok-shell-korea-law` | 6,000자 | 16,000바이트 | grok 20,000바이트 |
+| 기본값 (미등재 / 기타) | 6,000자 | 16,000바이트 | antigravity-client, agy, cline, openclaude 등 |
 
 상한 사용자 조정 환경변수:
 - `KOREA_LAW_MCP_MAX_CHARS`: 최대 글자 수 강제 지정 (클라이언트 기본값보다 우선)
