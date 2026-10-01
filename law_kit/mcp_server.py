@@ -223,7 +223,7 @@ TOOLS = [
     },
     {
         "name": "law_search",
-        "description": "법령, 자치법규, 행정규칙, 판례, 헌재결정례, 법령해석례, 행정심판례, 감사원 사전컨설팅의 8개 축을 한꺼번에 검색한다.",
+        "description": "법령, 자치법규, 행정규칙, 판례, 헌재결정례, 법령해석례, 행정심판례, 감사원 사전컨설팅의 8개 축을 한꺼번에 검색한다. 넓은 탐색용. 특정 조문은 law_article, 법 이름은 law_find",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -509,7 +509,7 @@ def _truncate_long_strings_in_obj(obj, max_str_len=150, path="", truncated_recor
         truncated_records = []
 
     if isinstance(obj, dict):
-        skip_keys = {"법령체계", "축별", "counts", "이번에_담은", "why", "지시", "경고", "note", "_end", "읽기안내"}
+        skip_keys = {"법령체계", "축별", "counts", "이번에_담은", "안내", "검색어_정리", "why", "지시", "경고", "note", "_end", "읽기안내"}
         for k, v in list(obj.items()):
             if k in skip_keys:
                 continue
@@ -585,7 +585,134 @@ def _truncate_single_item(item, max_str_len=30):
                 _truncate_single_item(val, max_str_len)
 
 
-def _compute_current_why_and_next_offset(data, tool_type, list_entries, gaps, counts_shrink_msg=None, str_trunc_msg=None):
+def _collect_nested_lists(obj, path=""):
+    """객체 내부에서 축소 가능한 중첩 리스트들을 수집한다."""
+    entries = []
+    if isinstance(obj, dict):
+        skip_keys = {"법령체계", "축별", "counts", "이번에_담은", "안내", "검색어_정리",
+                     "why", "지시", "경고", "note", "_end", "읽기안내"}
+        for k, v in obj.items():
+            if k in skip_keys:
+                continue
+            subpath = "%s.%s" % (path, k) if path else str(k)
+            if isinstance(v, list) and len(v) > 0:
+                entries.append((k, obj, k, subpath, list(v)))
+            elif isinstance(v, dict):
+                entries.extend(_collect_nested_lists(v, subpath))
+    return entries
+
+
+def _shrink_single_large_item(item, test_fn, max_chars, max_bytes):
+    """1건 덩어리가 너무 커서 안 들어갈 때 내부 중첩 목록(조문단위 등)과 긴 글을 축소한다.
+
+    규칙:
+        1. 그 안의 중첩 목록(조문단위 등)을 줄이고(앞에서부터 담을 수 있는 만큼, 뺀 수를 '생략' 에 기록).
+        2. 긴 글을 줄인다.
+        3. 이유(why)에 실제로 줄인 것과 숫자를 적는다.
+    """
+    nested_msgs = []
+    nested = _collect_nested_lists(item)
+    if nested:
+        # 핵심 본문 목록(조문단위 등)과 부수 목록(부칙단위 등) 분류
+        primary = [e for e in nested if "조문" in e[0] or "article" in e[0].lower()]
+        if not primary:
+            nested.sort(key=lambda x: len(x[4]), reverse=True)
+            primary = [nested[0]]
+            secondary = nested[1:]
+        else:
+            secondary = [e for e in nested if e not in primary]
+
+        # 대형 부수 목록(len > 1)은 핵심 본문 목록을 담기 위해 먼저 비워둠
+        for name, container, key, path, orig in secondary:
+            if len(orig) > 1:
+                container[key] = []
+                container["생략"] = len(orig)
+
+        # 1. 핵심 본문 목록(조문단위 등)을 앞에서부터 담을 수 있는 만큼 이진 탐색
+        for name, container, key, path, orig in primary:
+            low = 1
+            high = len(orig)
+            best_k = 0
+            while low <= high:
+                mid = (low + high) // 2
+                container[key] = orig[:mid]
+                omitted = len(orig) - mid
+                if omitted > 0:
+                    container["생략"] = omitted
+                else:
+                    container.pop("생략", None)
+                fits, _, _ = test_fn()
+                if fits:
+                    best_k = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            if best_k == 0:
+                best_k = 1
+
+            container[key] = orig[:best_k]
+            omitted = len(orig) - best_k
+            if omitted > 0:
+                container["생략"] = omitted
+                nested_msgs.append("상한 때문에 %s 에서 %d건을 뺐다. 범위를 좁혀 다시 물어라" % (name, omitted))
+            else:
+                container.pop("생략", None)
+
+        # 2. 남은 예산이 있으면 부수 목록들도 앞에서부터 담을 수 있는 만큼 담음
+        for name, container, key, path, orig in secondary:
+            if len(orig) <= 1:
+                continue
+            low = 1
+            high = len(orig)
+            best_k = 0
+            while low <= high:
+                mid = (low + high) // 2
+                container[key] = orig[:mid]
+                omitted = len(orig) - mid
+                if omitted > 0:
+                    container["생략"] = omitted
+                else:
+                    container.pop("생략", None)
+                fits, _, _ = test_fn()
+                if fits:
+                    best_k = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            container[key] = orig[:best_k]
+            omitted = len(orig) - best_k
+            if omitted > 0:
+                container["생략"] = omitted
+                nested_msgs.append("상한 때문에 %s 에서 %d건을 뺐다. 범위를 좁혀 다시 물어라" % (name, omitted))
+            else:
+                container.pop("생략", None)
+
+    # 3. 중첩 목록 축소 후에도 여전히 안 들어가면 긴 글을 단계적으로 축소
+    fits, _, _ = test_fn()
+    if not fits:
+        for max_l in (100, 50, 30, 20, 10, 5):
+            rec = _truncate_long_strings_in_obj(item, max_str_len=max_l)
+            fits, _, _ = test_fn()
+            if fits:
+                msg = _format_str_trunc_msg(rec)
+                if msg:
+                    nested_msgs.append(msg)
+                break
+        else:
+            _truncate_single_item(item, max_str_len=10)
+            rec = _truncate_long_strings_in_obj(item, max_str_len=10)
+            msg = _format_str_trunc_msg(rec)
+            if msg:
+                nested_msgs.append(msg)
+
+    return nested_msgs
+
+
+def _compute_current_why_and_next_offset(data, tool_type, list_entries, gaps,
+                                         counts_shrink_msg=None, str_trunc_msg=None,
+                                         nested_shrink_msgs=None):
     """현재 축소 상태에 따른 정확한 why 와 next_offset 을 계산한다."""
     is_paged = tool_type in ("tree", "term")
     why_parts = []
@@ -618,6 +745,9 @@ def _compute_current_why_and_next_offset(data, tool_type, list_entries, gaps, co
         if str_trunc_msg:
             why_parts.append(str_trunc_msg)
 
+        if nested_shrink_msgs:
+            why_parts.extend(nested_shrink_msgs)
+
         if counts_shrink_msg:
             why_parts.append(counts_shrink_msg)
 
@@ -632,6 +762,8 @@ def _compute_current_why_and_next_offset(data, tool_type, list_entries, gaps, co
                 why_parts.append("상한 때문에 %s 에서 %d건을 뺐다. 범위를 좁혀 다시 물어라" % (e.name, omitted))
         if str_trunc_msg:
             why_parts.append(str_trunc_msg)
+        if nested_shrink_msgs:
+            why_parts.extend(nested_shrink_msgs)
         if counts_shrink_msg:
             why_parts.append(counts_shrink_msg)
         if gaps:
@@ -657,6 +789,11 @@ def _build_response_payload(data, is_complete, why, instruction, warning,
         payload["지시"] = instruction
     if warning:
         payload["경고"] = warning
+    if isinstance(data, dict):
+        if "안내" in data:
+            payload["안내"] = data["안내"]
+        if "검색어_정리" in data:
+            payload["검색어_정리"] = data["검색어_정리"]
     payload["count"] = count_val
     if total_val is not None:
         payload["total"] = total_val
@@ -678,7 +815,7 @@ def _build_response_payload(data, is_complete, why, instruction, warning,
 
     if is_complete:
         if isinstance(data, dict):
-            header_keys = {"complete", "why", "지시", "경고", "count", "total", "next_offset", "offset",
+            header_keys = {"complete", "why", "지시", "경고", "안내", "검색어_정리", "count", "total", "next_offset", "offset",
                            "법령체계", "축별", "counts", "이번에_담은", "_end", "읽기안내"}
             for k, v in data.items():
                 if k not in header_keys:
@@ -793,12 +930,13 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
     list_entries, tool_type = _collect_body_lists(data)
     is_paged = tool_type in ("tree", "term")
     counts_shrink_msg = None
+    nested_shrink_msgs = []
 
     _sync_headers_and_dependent_data(data, tool_type, list_entries)
 
     cur_count = _compute_count(data)
     cur_why, cur_next_offset = _compute_current_why_and_next_offset(
-        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg, nested_shrink_msgs
     )
     if isinstance(data, dict):
         data["why"] = cur_why
@@ -836,7 +974,8 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
             target = active[0]
             processed.add(target)
 
-            low = 1 if is_paged else 0
+            # 규칙: 목록의 마지막 1건은 빼지 않는다.
+            low = 1 if len(target.orig_items) > 0 else 0
             high = len(target.current_items)
             best_k = 0
 
@@ -852,7 +991,7 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
                 _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg)
                 t_count = _compute_count(data)
                 t_why, t_next = _compute_current_why_and_next_offset(
-                    data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+                    data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg, nested_shrink_msgs
                 )
                 if isinstance(data, dict):
                     data["why"] = t_why
@@ -886,14 +1025,13 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
                 else:
                     high = mid - 1
 
-            # 규칙 (다) & (가): is_paged 이고 원래 항목이 있었는데 best_k == 0 인 경우
-            if is_paged and best_k == 0 and len(target.orig_items) > 0:
-                # (다) 머리의 counts 가 너무 커서 몸통이 0건이 되면 counts 를 상위 20개 + "그 밖 N개 법령" 으로 줄인다
-                if not counts_shrink_msg:
+            # 1건도 안 들어갈 때: 규칙에 따라 마지막 1건은 빼지 않는다.
+            if best_k == 0 and len(target.orig_items) > 0:
+                # 1. counts 축소 시도 (paged 일 때)
+                if is_paged and not counts_shrink_msg:
                     shrunk, cmsg = _shrink_counts_if_needed(data)
                     if shrunk:
                         counts_shrink_msg = cmsg
-                        # counts 축소 후 다시 탐색
                         low = 1
                         high = len(target.orig_items)
                         while low <= high:
@@ -905,14 +1043,14 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
                             else:
                                 high = mid - 1
 
-                # (가) 여전히 1건도 안 들어가면 그 항목의 긴 문자열을 먼저 줄인다("…(N자 생략)" + complete:false)
+                # 2. 여전히 1건도 안 들어가면 마지막 1건(target.orig_items[0])을 남기고 내부 중첩 목록과 긴 글을 줄인다
                 if best_k == 0:
                     best_k = 1
-                    for max_l in (100, 50, 20, 10, 5):
-                        _truncate_single_item(target.orig_items[0], max_str_len=max_l)
-                        fits, _, _ = _test_k(1)
-                        if fits:
-                            break
+                    target.container[target.key] = target.orig_items[:1]
+                    target.current_items = target.orig_items[:1]
+                    n_msgs = _shrink_single_large_item(target.orig_items[0], lambda: _test_k(1), max_chars, max_bytes)
+                    if n_msgs:
+                        nested_shrink_msgs.extend(n_msgs)
 
             target.container[target.key] = target.orig_items[:best_k]
             target.current_items = target.orig_items[:best_k]
@@ -926,7 +1064,7 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
 
             cur_count = _compute_count(data)
             cur_why, cur_next_offset = _compute_current_why_and_next_offset(
-                data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+                data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg, nested_shrink_msgs
             )
             if isinstance(data, dict):
                 data["why"] = cur_why
@@ -962,7 +1100,7 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
     _sync_headers_and_dependent_data(data, tool_type, list_entries, counts_shrink_msg)
 
     final_why, final_next_offset = _compute_current_why_and_next_offset(
-        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg
+        data, tool_type, list_entries, gaps, counts_shrink_msg, str_trunc_msg, nested_shrink_msgs
     )
     if isinstance(data, dict):
         data["why"] = final_why
@@ -1369,9 +1507,10 @@ def dispatch_tool(name, args):
             "successor": succ
         }
     elif name == "law_search":
-        query = args.get("query") or args.get("topic")
+        raw_query = args.get("query") or args.get("topic") or ""
         display = args.get("display", 20)
-        found = kit.search.across(query, display=display)
+        cleaned_query = kit.search.clean_query(raw_query)
+        found = kit.search.across(cleaned_query, display=display)
         axes = found.get("axes", {})
         axes_summary = {}
         for target, ax in axes.items():
@@ -1388,12 +1527,17 @@ def dispatch_tool(name, args):
                 "total": t_val,
                 "받은": m_val,
             }
-        return {
+        out = {
             "축별": axes_summary,
-            "query": found.get("query", query),
+            "query": cleaned_query,
             "axes": axes,
             "incomplete": found.get("incomplete", []),
         }
+        if cleaned_query != raw_query.strip():
+            out["검색어_정리"] = cleaned_query
+        if kit.search.has_article_number(raw_query):
+            out["안내"] = "특정 조문은 law_article(law, jo) 로 보라"
+        return out
     elif name == "law_api":
         target = args.get("target")
         query = args.get("query")
@@ -1409,7 +1553,21 @@ def dispatch_tool(name, args):
         extra = {k: v for k, v in args.items() if k not in ("target", "service", "params")}
         call_params = dict(params)
         call_params.update(extra)
-        return kit.client.call(target, service=service, **call_params)
+        res = kit.client.call(target, service=service, **call_params)
+
+        target_str = str(target).strip().lower() if target else ""
+        has_jo = any(k.upper() == "JO" and v for k, v in call_params.items())
+        if target_str in ("law", "eflaw") and service and not has_jo:
+            no_jo_msg = "법 전체 본문은 매우 크다 - JO(조번호)로 좁히거나 law_article 을 써라"
+            return {
+                "target": res.target,
+                "total": res.total,
+                "count": len(res.partial),
+                "items": res.partial,
+                "complete": False,
+                "why": no_jo_msg if res.complete else ("%s | %s" % (res.why_incomplete(), no_jo_msg)),
+            }
+        return res
     else:
         raise ValueError("알 수 없는 도구입니다: %s" % name)
 
