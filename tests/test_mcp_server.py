@@ -76,7 +76,9 @@ def test_initialize_response():
     assert res["result"]["protocolVersion"] == "2024-11-05"
     assert "tools" in res["result"]["capabilities"]
     assert res["result"]["serverInfo"]["name"] == "korea-law"
-    assert res["result"]["serverInfo"]["version"] == "1.0.0"
+    # 버전 + 코드 지문 - keep-alive 로 남은 옛 서버를 알아볼 수 있게 한다.
+    assert res["result"]["serverInfo"]["version"] == "%s+%s" % (
+        mcp_server.SERVER_VERSION, mcp_server.SERVER_BUILD)
     assert "불완전" in res["result"]["instructions"]
 
     # 프로토콜 버전이 생략된 경우 기본값(2025-06-18)을 쓰는지 확인
