@@ -54,6 +54,8 @@ python D:\...\korea-law-kit\korea_law_mcp.py
 | `law_search` | 8개 축 |
 | `law_api` | 설명서 195건 검색 |
 | `law_call` | 아무 target 직접 |
+| `law_article` | 특정 조문 조회 (조·항·호 정밀 추출) |
+| `law_annex_text` | 별표·서식 본문 텍스트 내용 |
 
 결과가 조금이라도 불완전하면 — 어느 깊이에 있든, 응답이 클라이언트 상한에서
 잘렸든 — 최상위에 `"complete": false`, `why`, `지시` 가 붙고 받은 만큼은
@@ -147,6 +149,7 @@ API 호출 0회.
 | `history.py` | 연혁 · 구법명 | `eflaw`, `oldAndNew` |
 | `annex.py` | 별표 · 서식 + 파일 | `licbyl` |
 | `laws.py` | 이름 → 법령ID (띄어쓰기 · 약칭 · 구법) | `law`, `lsAbrv`, `eflaw` |
+| `articles.py` | 특정 조문(항·호) · 별표 본문 텍스트 | `law` (lawService) |
 | `search.py` | 8개 축 한꺼번에 | `law` `ordin` `admrul` `prec` `detc` `expc` `decc` `baiPvcs` |
 | `catalog.py` | 어떤 API 가 있나 (195건 설명서) | — (파일 읽기) |
 

@@ -8,8 +8,26 @@
 여기서도 원칙은 같다: **못 물은 축과 물었는데 없는 축을 구분한다.**
 `axis["complete"]` 가 False 인 축을 놓고 "없다" 고 말하면 안 된다.
 """
+import re
+
 from . import client
 from .shape import Answer, text
+
+
+def clean_query(query):
+    """따옴표, 괄호 등 검색 문법 기호를 걷어 내고 공백을 정리한다."""
+    if not query:
+        return ""
+    cleaned = re.sub(r'["\'“”‘’`´()[\]{}<>（）【】「」『』《》]', ' ', str(query))
+    return " ".join(cleaned.split())
+
+
+def has_article_number(query):
+    """질의어에 '제84조' 처럼 조번호가 섞여 있는지 확인한다."""
+    if not query:
+        return False
+    return bool(re.search(r'제\s*\d+\s*조', str(query)))
+
 
 #: (target, 사람이 읽는 이름, 이름검색 지원 여부)
 AXES = (
