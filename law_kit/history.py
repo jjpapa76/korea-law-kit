@@ -88,6 +88,131 @@ def is_current(name):
     return False, "현행·연혁 어디에도 없다"
 
 
+def _canonicalize_name(cand):
+    """법령명을 띄어쓰기가 있는 정식 명칭으로 정규화한다."""
+    if not cand:
+        return cand
+    cand = str(cand).strip()
+    squashed = "".join(cand.split())
+    # 1. 현행 법령에서 정식명 찾기
+    cur = client.call("law", query=cand, search=1, display=10)
+    if cur.ok:
+        for item in cur.partial:
+            t = text(item.get("법령명한글"))
+            if t and "".join(t.split()) == squashed:
+                return t
+    # 2. 연혁 법령에서 정식명 찾기
+    ef = client.call("eflaw", query=cand, search=1, display=10)
+    if ef.ok:
+        for item in ef.partial:
+            t = text(item.get("법령명한글"))
+            if t and "".join(t.split()) == squashed:
+                return t
+    return cand
+
+
+def _find_same_id_candidate(name, last, ef_items=None):
+    """동일 법령ID를 가진 판들 중 시행일자 순으로 바로 다음 이름을 직접_후보로,
+    그 ID의 현행 이름이 다르면 현행_이름으로 추출한다."""
+    lid = str(last.get("ID") or "")
+    if not lid:
+        return None
+    name_squashed = "".join(str(name).split())
+
+    # 1. 동일 ID 기본정보 조회
+    id_body = client.call("eflaw", service=True, ID=lid)
+    id_curr_title = None
+    id_prev_title = None
+    if id_body.ok and id_body.partial and isinstance(id_body.partial[0], dict):
+        basic = id_body.partial[0].get("기본정보", {})
+        id_curr_title = text(basic.get("법령명_한글"))
+        id_prev_title = text(basic.get("이전법령명"))
+        if id_curr_title:
+            id_curr_title = _canonicalize_name(id_curr_title)
+        if id_prev_title:
+            id_prev_title = _canonicalize_name(id_prev_title)
+
+    # 2. 동일 ID 판 목록 수집
+    items = list(ef_items or [])
+    if not items:
+        ef_list = client.call("eflaw", query=name, search=1, display=100)
+        if ef_list.ok:
+            items.extend(ef_list.partial)
+    if id_curr_title and "".join(id_curr_title.split()) != name_squashed:
+        ef_list2 = client.call("eflaw", query=id_curr_title, search=1, display=100)
+        if ef_list2.ok:
+            items.extend(ef_list2.partial)
+    if id_prev_title and "".join(id_prev_title.split()) != name_squashed:
+        ef_list3 = client.call("eflaw", query=id_prev_title, search=1, display=100)
+        if ef_list3.ok:
+            items.extend(ef_list3.partial)
+
+    # 3. 동일 ID인 판만 모으기
+    same_id_versions = []
+    seen_keys = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("법령ID") or "") == lid:
+            t = text(it.get("법령명한글"))
+            if not t:
+                continue
+            efYd = text(it.get("시행일자") or "")
+            promYd = text(it.get("공포일자") or "")
+            key = (efYd, promYd, "".join(t.split()))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                same_id_versions.append({
+                    "법령명": t,
+                    "시행일자": efYd,
+                    "공포일자": promYd,
+                })
+
+    # 시행일자, 공포일자 오름차순 정렬
+    same_id_versions.sort(key=lambda r: (r["시행일자"], r["공포일자"]))
+
+    # 4. 입력 이름의 마지막 판 시행일자 이후 가장 먼저 나오는 다른 이름 찾기
+    last_efyd = str(last.get("시행일자") or "")
+    last_promyd = str(last.get("공포일자") or "")
+
+    direct_cand = None
+    for r in same_id_versions:
+        r_squashed = "".join(r["법령명"].split())
+        if r_squashed != name_squashed:
+            if (r["시행일자"], r["공포일자"]) >= (last_efyd, last_promyd):
+                direct_cand = _canonicalize_name(r["법령명"])
+                break
+
+    if not direct_cand and id_curr_title and "".join(id_curr_title.split()) != name_squashed:
+        direct_cand = id_curr_title
+
+    if not direct_cand:
+        return None
+
+    cand_obj = {
+        "직접_후보": direct_cand,
+        "근거": "같은 법령ID 제명변경"
+    }
+
+    # ID의 현행 이름이 직접_후보와 다르면 "현행_이름" 따로 넣기
+    # latest_title 은 동일 ID 판들 중 가장 최근 판의 이름이거나 id_curr_title
+    latest_title = None
+    if same_id_versions:
+        candidate_latest = same_id_versions[-1]["법령명"]
+        if "".join(candidate_latest.split()) != name_squashed:
+            latest_title = candidate_latest
+    if not latest_title and id_curr_title and "".join(id_curr_title.split()) != name_squashed:
+        latest_title = id_curr_title
+
+    if latest_title:
+        latest_title = _canonicalize_name(latest_title)
+        if ("".join(latest_title.split()) != name_squashed and
+                "".join(latest_title.split()) != "".join(direct_cand.split())):
+            cand_obj["현행_이름"] = latest_title
+
+    return cand_obj
+
+
 def successor(name):
     """구법의 **뒤를 이은 법**을 찾아 본다.
 
@@ -112,75 +237,62 @@ def successor(name):
         return {"name": name, "status": "미확인", "why": "연혁을 못 찾았다",
                 "candidates": []}
     last = rows[0]
-    # MST 로 부를 때는 efYd(시행일자)가 필수다. 빠뜨리면 HTML 이 오고,
-    # 그 실패가 "후보 0개" 로 보였다(도시계획법 실측 2026-09-24).
-    body = client.call("eflaw", service=True, MST=last["MST"],
-                       efYd=last.get("시행일자", ""))
-    if not body.ok or not body.complete:
-        return {"name": name, "status": "구법", "why": why,
-                "last_version": last, "candidates": [],
-                "complete": False,
-                "note": "마지막 판 본문을 못 받아 후보를 못 뽑았다 - %s"
-                        % (body.error or "끝까지 받지 못했다")}
-    import json as _json
-    import re
-    blob = _json.dumps(body.partial, ensure_ascii=False)
-    hints = []
-    # 타법폐지면 폐지한 법의 이름이 「」 없이 부칙 머리에 붙어 온다:
-    # "부칙(국토의계획및이용에관한법률) <제6655호,2002.2.4>"
+    last_kind = last.get("제개정") or ""
     name_squashed = "".join(str(name).split())
-    for pattern in (r"부칙\(([^)]{2,40}?(?:법|법률))\)",
-                    r"「([^」]{4,40}?(?:법|법률))」"):
-        for match in re.finditer(pattern, blob):
-            title = match.group(1).strip()
-            if "".join(title.split()) != name_squashed and title not in hints:
-                hints.append(title)
 
-    # 부칙에서 후보를 못 찾은 경우: 연혁에서 동일 법령ID를 가진 제명변경 판 탐색 (예: 풍수해대책법 -> 자연재해대책법)
-    if not hints and last.get("ID"):
-        ef_list = client.call("eflaw", query=name, search=1, display=100)
-        if ef_list.ok:
-            for item in ef_list.partial:
-                if str(item.get("법령ID") or "") == str(last["ID"]):
-                    t = text(item.get("법령명한글"))
-                    if t and "".join(t.split()) != name_squashed:
-                        if t not in hints:
-                            hints.append(t)
+    candidates = []
 
-    # 후보 법령명을 띄어쓰기 있는 정식명으로 정규화
-    canonical_hints = []
-    for cand in hints:
-        squashed = "".join(cand.split())
-        official = None
-        # 현행 법령에서 정식명 찾기
-        cur = client.call("law", query=cand, search=1, display=10)
-        if cur.ok:
-            for item in cur.partial:
-                t = text(item.get("법령명한글"))
-                if t and "".join(t.split()) == squashed:
-                    official = t
-                    break
-        if not official:
-            # 연혁 법령에서 정식명 찾기
-            ef = client.call("eflaw", query=cand, search=1, display=10)
-            if ef.ok:
-                for item in ef.partial:
-                    t = text(item.get("법령명한글"))
-                    if t and "".join(t.split()) == squashed:
-                        official = t
-                        break
-        final_cand = official or cand
-        if final_cand not in canonical_hints:
-            canonical_hints.append(final_cand)
+    # 1. 마지막 판의 제개정구분이 폐지·타법폐지일 때만 "폐지시킨 법"(그 판 부칙의 법령명)을 후보로 한다.
+    # 타법개정 판의 부칙 법령명은 그 법을 고친 다른 법일 뿐이니 절대 후보로 쓰지 않는다.
+    if "폐지" in last_kind:
+        # MST 로 부를 때는 efYd(시행일자)가 필수다. 빠뜨리면 HTML 이 오고,
+        # 그 실패가 "후보 0개" 로 보였다(도시계획법 실측 2026-09-24).
+        body = client.call("eflaw", service=True, MST=last["MST"],
+                           efYd=last.get("시행일자", ""))
+        if not body.ok or not body.complete:
+            return {"name": name, "status": "구법", "why": why,
+                    "last_version": last, "candidates": [],
+                    "complete": False,
+                    "note": "마지막 판 본문을 못 받아 후보를 못 뽑았다 - %s"
+                            % (body.error or "끝까지 받지 못했다")}
+        import json as _json
+        import re
+        blob = _json.dumps(body.partial, ensure_ascii=False)
+        for pattern in (r"부칙\(([^)]{2,40}?(?:법|법률))\)",
+                        r"「([^」]{4,40}?(?:법|법률))」"):
+            for match in re.finditer(pattern, blob):
+                title = match.group(1).strip()
+                if "".join(title.split()) != name_squashed:
+                    canon = _canonicalize_name(title)
+                    cand_obj = {"직접_후보": canon, "근거": "폐지 부칙"}
+                    # 폐지시킨 법이 현행인지 확인하고 구법이면 현행 이름/다음 이름 추적
+                    is_alv, _ = is_current(canon)
+                    if is_alv is False:
+                        cand_v = versions(canon)
+                        cand_rows = cand_v.partial("versions") or []
+                        if cand_rows and cand_rows[0].get("ID"):
+                            sub_cand = _find_same_id_candidate(canon, cand_rows[0])
+                            if sub_cand and sub_cand.get("직접_후보"):
+                                cand_obj["현행_이름"] = sub_cand["직접_후보"]
+                    if not any(c.get("직접_후보") == cand_obj["직접_후보"] for c in candidates):
+                        candidates.append(cand_obj)
 
-    if not canonical_hints:
-        # 후보를 못 뽑은 것은 "뒤를 이은 법이 없다" 가 아니다.
-        return {"name": name, "status": "구법", "why": why,
+    # 2. 제명변경·전부개정(또는 폐지가 아닌 경우이거나 부칙에서 못 찾은 경우):
+    # 같은 법령ID의 다음 이름을 후보로
+    if not candidates and last.get("ID"):
+        same_id_cand = _find_same_id_candidate(name, last)
+        if same_id_cand:
+            candidates.append(same_id_cand)
+
+    if not candidates:
+        # 근거를 못 찾으면 complete:false + why "승계 근거를 찾지 못했다"
+        return {"name": name, "status": "구법", "why": "승계 근거를 찾지 못했다",
                 "last_version": last, "candidates": [], "complete": False,
-                "note": "본문에서 승계 후보를 찾지 못했다 - 없다는 뜻이 아니다"}
+                "note": "승계 근거를 찾지 못했다 - 거짓 후보 금지"}
+
     return {"name": name, "status": "구법", "why": why,
             "last_version": last,
-            "candidates": canonical_hints[:10],
+            "candidates": candidates[:10],
             "complete": True,
             "note": ("후보다. 단정이 아니다 - 법제처 API 에 승계 관계를 "
                      "직접 주는 칸이 없다. 사람이 확인해야 한다")}
