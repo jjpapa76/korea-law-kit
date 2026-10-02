@@ -186,11 +186,15 @@ def _resolve_law_info(law):
         hits = laws.find(s)
     except Exception as exc:
         if exc.__class__.__name__ == "Incomplete" or isinstance(exc, Incomplete):
+            err_msg = str(exc)
+            m_why = re.search(r"연혁 목록 \d+쪽까지 봤지만 끝을 보지 못했다", err_msg)
+            if m_why:
+                err_msg = m_why.group(0)
             return {
                 "mst": None,
                 "name": s,
                 "candidates": [],
-                "error": str(exc),
+                "error": err_msg,
                 "is_historic": False,
                 "efYd": "",
             }
@@ -538,17 +542,52 @@ def get_article(law, jo, hang=None):
                 full_res = client.call("eflaw", service=True, MST=mst, efYd=efyd)
             else:
                 full_res = client.call("law", service=True, MST=mst)
+
+            if not full_res.ok or not full_res.partial:
+                fail_dict = {
+                    "law": final_law_name or law_name or str(law),
+                    "MST": mst,
+                    "jo": jo,
+                    "complete": False,
+                    "why": "그 판 전체 본문을 받지 못해 조문이 없는지 확인하지 못했다",
+                }
+                if is_historic:
+                    fail_dict["구법"] = True
+                    if base_mst:
+                        fail_dict["기준판_MST"] = base_mst
+                    if base_efyd:
+                        fail_dict["기준판_시행일자"] = base_efyd
+                    if efyd:
+                        fail_dict["마지막_시행일자"] = efyd
+                return fail_dict
+
+            f_root = full_res.partial[0]
+            f_law = f_root.get("법령") if isinstance(f_root, dict) and "법령" in f_root else f_root
+            if not isinstance(f_root, dict) or not isinstance(f_law, dict):
+                fail_dict = {
+                    "law": final_law_name or law_name or str(law),
+                    "MST": mst,
+                    "jo": jo,
+                    "complete": False,
+                    "why": "그 판 전체 본문을 받지 못해 조문이 없는지 확인하지 못했다",
+                }
+                if is_historic:
+                    fail_dict["구법"] = True
+                    if base_mst:
+                        fail_dict["기준판_MST"] = base_mst
+                    if base_efyd:
+                        fail_dict["기준판_시행일자"] = base_efyd
+                    if efyd:
+                        fail_dict["마지막_시행일자"] = efyd
+                return fail_dict
+
             has_any_units = False
-            if full_res.ok and full_res.partial:
-                f_root = full_res.partial[0]
-                f_law = f_root.get("법령") if isinstance(f_root, dict) and "법령" in f_root else f_root
-                if isinstance(f_law, dict):
-                    f_jo_root = f_law.get("조문")
-                    if f_jo_root and isinstance(f_jo_root, dict) and f_jo_root.get("조문단위"):
-                        f_raw_units = f_jo_root.get("조문단위")
-                        f_units = f_raw_units if isinstance(f_raw_units, list) else [f_raw_units]
-                        if f_units:
-                            has_any_units = True
+            f_jo_root = f_law.get("조문")
+            if f_jo_root and isinstance(f_jo_root, dict) and f_jo_root.get("조문단위"):
+                f_raw_units = f_jo_root.get("조문단위")
+                f_units = f_raw_units if isinstance(f_raw_units, list) else [f_raw_units]
+                if f_units:
+                    has_any_units = True
 
             if has_any_units:
                 # JO 없이 조회한 본문에 조문이 있으므로 본문 있는 법(현행법 또는 구법)이다. 해당 조가 없으므로 "조문 없음".
