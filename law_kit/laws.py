@@ -89,7 +89,10 @@ def find(name, limit=20, include_historic=True):
         # 현행에 없다 = 폐지됐거나 제명이 바뀌었다. 구법 목록을 본다.
         # 필요한 만큼 쪽을 넘겨 받아라 (상한 5쪽, 그래도 끝을 못 보면 complete:false + why, 예외 금지)
         historic_failures = []
+        saw_end = False
+        last_page = 0
         for page in range(1, 6):
+            last_page = page
             old = client.call(TARGET_HISTORIC, query=name, search=1, display=200, page=page)
             if not old.ok:
                 historic_failures.append("연혁 법령 조회: " + (old.error or old.why_incomplete()))
@@ -105,15 +108,21 @@ def find(name, limit=20, include_historic=True):
                 exp_total = int(old.total or 0)
             except (ValueError, TypeError):
                 exp_total = None
-            if not old.partial or (exp_total is not None and page * 200 >= exp_total):
+            if not old.partial or (exp_total is not None and page * 200 >= exp_total) or (len(old.partial) < 200 and old.complete):
+                saw_end = True
                 break
-        if not out and historic_failures:
-            failures.extend(historic_failures)
+        if not out:
+            if historic_failures:
+                failures.extend(historic_failures)
+            elif not saw_end:
+                failures.append("연혁 목록 %d쪽까지 봤지만 끝을 보지 못했다" % last_page)
         for entry in out:
             entry["찾은방법"] = "historic"
     if not out and failures:
         # 빈 목록을 돌려주면 부르는 쪽은 "그런 법이 없다" 로 읽는다.
         # 못 물어본 것을 없는 것으로 만들지 않는다.
+        if len(failures) == 1 and failures[0].startswith("연혁 목록"):
+            raise Incomplete(failures[0])
         raise Incomplete("'%s' 를 찾지 못했지만 조회가 온전하지 않았다: %s"
                          % (name, " / ".join(failures)))
     out.sort(key=lambda e: (e["찾은방법"] != "exact", e.get("시행일자") or ""),

@@ -145,7 +145,9 @@ def test_cache_dir_default_is_user_home_cache(monkeypatch, tmp_path):
             monkeypatch.setattr(winreg, "QueryValueEx", fake_query)
         except ImportError:
             pass
+    _orig_incomplete = client.Incomplete
     importlib.reload(client)
+    client.Incomplete = _orig_incomplete
     try:
         expected = os.path.normpath(os.path.expanduser(
             os.path.join("~", ".cache", "korea-law-kit")))
@@ -154,6 +156,7 @@ def test_cache_dir_default_is_user_home_cache(monkeypatch, tmp_path):
             str(fake_home / ".cache" / "korea-law-kit"))
     finally:
         importlib.reload(client)
+        client.Incomplete = _orig_incomplete
         importlib.reload(laws)
 
 
@@ -162,11 +165,14 @@ def test_cache_dir_honors_law_kit_cache_setting(monkeypatch, tmp_path):
     import importlib
     custom_dir = str(tmp_path / "custom_cache")
     monkeypatch.setenv("LAW_KIT_CACHE", custom_dir)
+    _orig_incomplete = client.Incomplete
     importlib.reload(client)
+    client.Incomplete = _orig_incomplete
     try:
         assert client.CACHE_DIR == custom_dir
     finally:
         importlib.reload(client)
+        client.Incomplete = _orig_incomplete
         importlib.reload(laws)
 
 
