@@ -788,7 +788,7 @@ def test_setting_prefers_process_env_then_user_registry(monkeypatch):
 def _old_law(monkeypatch, body):
     monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
     monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
-        "complete": True, "versions": [{"MST": "57195", "시행일자": "20030101"}]}))
+        "complete": True, "versions": [{"MST": "57195", "시행일자": "20030101", "제개정": "타법폐지"}]}))
     seen = {}
 
     def fake_call(target, service=False, **params):
@@ -809,7 +809,7 @@ def test_successor_sends_efyd_and_reads_the_abolishing_law(monkeypatch):
     seen = _old_law(monkeypatch, body)
     found = history.successor("도시계획법")
     assert seen.get("efYd") == "20030101"
-    assert found["candidates"] == ["국토의 계획 및 이용에 관한 법률"]
+    assert found["candidates"] == [{"직접_후보": "국토의 계획 및 이용에 관한 법률", "근거": "폐지 부칙"}]
     assert found["complete"] is True
 
 
@@ -821,14 +821,17 @@ def test_successor_body_failure_is_not_zero_candidates(monkeypatch):
 
 def test_successor_without_hints_is_unknown(monkeypatch):
     _old_law(monkeypatch, client.Result("eflaw", items=[{"조문": "폐지한다"}], total=1))
-    assert history.successor("도시계획법")["complete"] is False
+    res = history.successor("도시계획법")
+    assert res["complete"] is False
+    assert res["why"] == "승계 근거를 찾지 못했다"
+    assert res["candidates"] == []
 
 
 def test_successor_from_same_law_id_history(monkeypatch):
     """부칙에 승계 법명이 없어도 연혁에서 동일 법령ID 제명변경 판을 찾아 후보로 제시한다 (예: 풍수해대책법 -> 자연재해대책법)."""
     monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
     monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
-        "complete": True, "versions": [{"MST": "4237", "ID": "000959", "시행일자": "19910201"}]}))
+        "complete": True, "versions": [{"MST": "4237", "ID": "000959", "시행일자": "19910201", "제개정": "타법개정"}]}))
 
     def fake_call(target, service=False, **params):
         if service:
@@ -837,8 +840,8 @@ def test_successor_from_same_law_id_history(monkeypatch):
         if target == "eflaw":
             # 연혁 목록에서 동일 ID 000959 를 가진 자연재해대책법 존재
             return client.Result("eflaw", items=[
-                {"법령명한글": "자연재해대책법", "법령ID": "000959"},
-                {"법령명한글": "풍수해대책법", "법령ID": "000959"}
+                {"법령명한글": "자연재해대책법", "법령ID": "000959", "시행일자": "19951206", "공포일자": "19951206"},
+                {"법령명한글": "풍수해대책법", "법령ID": "000959", "시행일자": "19910201", "공포일자": "19901227"}
             ], total=2)
         if target == "law":
             q = params.get("query", "")
@@ -849,7 +852,75 @@ def test_successor_from_same_law_id_history(monkeypatch):
     monkeypatch.setattr(client, "call", fake_call)
     found = history.successor("풍수해대책법")
     assert found["complete"] is True
-    assert found["candidates"] == ["자연재해대책법"]
+    assert found["candidates"] == [{"직접_후보": "자연재해대책법", "근거": "같은 법령ID 제명변경"}]
+
+
+def test_successor_ignores_other_laws_in_partial_amendment(monkeypatch):
+    """결함 1 검증: 마지막 판이 타법개정일 때 부칙의 타법들은 후보로 쓰지 않고 동일 ID 제명변경을 우선한다."""
+    monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
+    monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
+        "complete": True, "versions": [{"MST": "57700", "ID": "001809", "시행일자": "20031001", "공포일자": "20021230", "제개정": "타법개정"}]}))
+
+    def fake_call(target, service=False, **params):
+        if service and params.get("MST") == "57700":
+            # 타법개정 본문 부칙에 국민연금법 등이 있음
+            return client.Result("eflaw", items=[{
+                "부칙": {"부칙내용": [["부칙(국민연금법) <제6841호,2002.12.30>"]]},
+                "기본정보": {"법령명_한글": "주택건설촉진법", "제개정구분": "타법개정"}
+            }], total=1)
+        if service and params.get("ID") == "001809":
+            return client.Result("eflaw", items=[{
+                "기본정보": {"법령명_한글": "주택법", "법령ID": "001809"}
+            }], total=1)
+        if target == "eflaw":
+            return client.Result("eflaw", items=[
+                {"법령명한글": "주택법", "법령ID": "001809", "시행일자": "20031130", "공포일자": "20030529"},
+                {"법령명한글": "주택건설촉진법", "법령ID": "001809", "시행일자": "20031001", "공포일자": "20021230"}
+            ], total=2)
+        if target == "law":
+            q = params.get("query", "")
+            if "".join(str(q).split()) == "주택법":
+                return client.Result("law", items=[{"법령명한글": "주택법"}], total=1)
+        return client.Result(target, items=[], total=0)
+
+    monkeypatch.setattr(client, "call", fake_call)
+    found = history.successor("주택건설촉진법")
+    assert found["complete"] is True
+    # 국민연금법이 아닌 주택법이어야 함
+    assert found["candidates"] == [{"직접_후보": "주택법", "근거": "같은 법령ID 제명변경"}]
+
+
+def test_successor_same_id_chain_tracks_direct_and_current(monkeypatch):
+    """결함 2 검증: 동일 ID 추적 시 [구법 -> 중간법 -> 현행법] 체인에서 바로 다음 하나만 직접_후보, 현행은 현행_이름으로 분리."""
+    monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
+    monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
+        "complete": True, "versions": [{"MST": "100", "ID": "999999", "시행일자": "19900101", "공포일자": "19891231", "제개정": "제정"}]}))
+
+    def fake_call(target, service=False, **params):
+        if service and params.get("ID") == "999999":
+            return client.Result("eflaw", items=[{
+                "기본정보": {"법령명_한글": "현행법", "법령ID": "999999"}
+            }], total=1)
+        if target == "eflaw":
+            return client.Result("eflaw", items=[
+                {"법령명한글": "현행법", "법령ID": "999999", "시행일자": "20100101", "공포일자": "20091231"},
+                {"법령명한글": "중간법", "법령ID": "999999", "시행일자": "20000101", "공포일자": "19991231"},
+                {"법령명한글": "구법", "법령ID": "999999", "시행일자": "19900101", "공포일자": "19891231"}
+            ], total=3)
+        if target == "law":
+            q = params.get("query", "")
+            return client.Result("law", items=[{"법령명한글": q}], total=1)
+        return client.Result(target, items=[], total=0)
+
+    monkeypatch.setattr(client, "call", fake_call)
+    found = history.successor("구법")
+    assert found["complete"] is True
+    # 시행일자 순 바로 다음은 중간법, 현행 이름은 현행법
+    assert found["candidates"] == [{
+        "직접_후보": "중간법",
+        "근거": "같은 법령ID 제명변경",
+        "현행_이름": "현행법"
+    }]
 
 
 
