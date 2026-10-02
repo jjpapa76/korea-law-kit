@@ -132,12 +132,16 @@ def _find_same_id_candidate(name, last, ef_items=None):
         if id_prev_title:
             id_prev_title = _canonicalize_name(id_prev_title)
 
-    # 2. 동일 ID 판 목록 수집
+    # 2. 동일 ID 판 목록 수집 (상한 5쪽)
     items = list(ef_items or [])
     if not items:
-        ef_list = client.call("eflaw", query=name, search=1, display=100)
-        if ef_list.ok:
-            items.extend(ef_list.partial)
+        ef_list = client.call_all("eflaw", query=name, search=1, page_size=100, max_pages=5)
+        if not ef_list.ok or not ef_list.complete:
+            return {
+                "complete": False,
+                "why": "같은 법령ID 연혁을 끝까지 받지 못했다"
+            }
+        items.extend(ef_list.partial)
     if id_curr_title and "".join(id_curr_title.split()) != name_squashed:
         ef_list2 = client.call("eflaw", query=id_curr_title, search=1, display=100)
         if ef_list2.ok:
@@ -277,11 +281,14 @@ def successor(name):
                     if not any(c.get("직접_후보") == cand_obj["직접_후보"] for c in candidates):
                         candidates.append(cand_obj)
 
-    # 2. 제명변경·전부개정(또는 폐지가 아닌 경우이거나 부칙에서 못 찾은 경우):
-    # 같은 법령ID의 다음 이름을 후보로
     if not candidates and last.get("ID"):
         same_id_cand = _find_same_id_candidate(name, last)
-        if same_id_cand:
+        if same_id_cand and same_id_cand.get("complete") is False:
+            return {"name": name, "status": "구법",
+                    "why": same_id_cand.get("why") or "같은 법령ID 연혁을 끝까지 받지 못했다",
+                    "last_version": last, "candidates": [], "complete": False,
+                    "note": "같은 법령ID 연혁을 끝까지 받지 못했다 - 근거 없는 후보 금지"}
+        if same_id_cand and same_id_cand.get("직접_후보"):
             candidates.append(same_id_cand)
 
     if not candidates:
