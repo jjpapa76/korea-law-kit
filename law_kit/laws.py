@@ -17,11 +17,36 @@
 from . import client
 from .client import Incomplete
 from .shape import text
+import json
+import os
 
 #: 현행 법령
 TARGET_CURRENT = "law"
 #: 시행일 법령. **폐지·개정 이전 판까지** 들어 있다 - 구법명은 여기서만 나온다
 TARGET_HISTORIC = "eflaw"
+
+#: 통칭 약칭 사전 파일 경로
+_ALIASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aliases.json")
+_COMMON_NAMES_CACHE = None
+
+
+def _get_common_names():
+    global _COMMON_NAMES_CACHE
+    if _COMMON_NAMES_CACHE is None:
+        _COMMON_NAMES_CACHE = {}
+        if os.path.exists(_ALIASES_PATH):
+            try:
+                with open(_ALIASES_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                common = data.get("통칭", {})
+                for k, v in common.items():
+                    squashed_k = _squash(k)
+                    canonical = v.get("정식명") if isinstance(v, dict) else v
+                    if canonical:
+                        _COMMON_NAMES_CACHE[squashed_k] = canonical
+            except Exception:
+                pass
+    return _COMMON_NAMES_CACHE
 
 
 def _squash(name):
@@ -76,6 +101,25 @@ def find(name, limit=20, include_historic=True):
     if not current.complete:
         failures.append("현행 법령 조회: " + current.why_incomplete())
     take(current, "search")
+    if not out:
+        # 공식 약칭은 아니지만 실무에서 쓰이는 통칭(관용명)을 확인한다
+        common_map = _get_common_names()
+        if wanted in common_map:
+            canonical_name = common_map[wanted]
+            c_res = client.call(TARGET_CURRENT, query=canonical_name, search=1, display=100)
+            if not c_res.complete:
+                failures.append("통칭 정식 법령 조회: " + c_res.why_incomplete())
+            c_wanted = _squash(canonical_name)
+            for item in c_res.partial:
+                title = text(item.get("법령명한글"))
+                if not title:
+                    continue
+                key = (title, text(item.get("법령ID")))
+                if key in seen:
+                    continue
+                if _squash(title) == c_wanted:
+                    seen.add(key)
+                    out.append(_entry(item, "통칭(공식 약칭 아님)"))
     if not out:
         # 약칭은 이름 검색으로 안 걸린다. 약칭 사전을 통째로 받아 맞춘다
         # (2,713건, 캐시되므로 두 번째부터 호출 0).

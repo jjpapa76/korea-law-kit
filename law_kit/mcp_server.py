@@ -1424,6 +1424,30 @@ def dispatch_tool(name, args):
             # 진짜 0건이지만 "그런 법은 없다" 로 읽히기 쉽다 - 이름이 틀렸을 가능성을 알린다.
             out["안내"] = ("이 이름으로 찾은 법이 없다. 띄어쓰기·약칭·옛 이름이 다를 수 있다 - "
                          "law_search 로 넓게 찾거나 이름을 바꿔 다시 물어라")
+        else:
+            historic_items = 0
+            has_historic = False
+            suc_cache = {}
+            for item in found:
+                is_old = (item.get("현행") != "현행" or item.get("찾은방법") == "historic")
+                if is_old:
+                    has_historic = True
+                    item["현행아님"] = True
+                    if historic_items < 3:
+                        historic_items += 1
+                        target_name = item.get("법령명") or law_name
+                        if target_name not in suc_cache:
+                            try:
+                                suc = kit.history.successor(target_name)
+                                cands = suc.get("candidates") if isinstance(suc, dict) else getattr(suc, "candidates", None)
+                                suc_cache[target_name] = cands if cands else None
+                            except Exception:
+                                suc_cache[target_name] = None
+                        cands = suc_cache.get(target_name)
+                        if cands:
+                            item["현행_법령명_후보"] = cands
+            if has_historic:
+                out["안내"] = "옛 법령명이다. 현행 법령은 현행_법령명_후보 를 확인하라"
         return out
     elif name == "law_term":
         term = args.get("term") or args.get("word")
