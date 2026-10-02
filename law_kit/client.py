@@ -283,27 +283,43 @@ def _cache_read(url, ttl):
     return body
 
 
-def _cache_write(url, body, _verified=False):
+_INTERNAL_NET_KEY = object()
+
+
+def _cache_write(url, body, *args, **kwargs):
+    """외부에서 호출 가능한 쓰기 함수.
+    어떤 인자가 주어져도 표지를 붙이지 않으며, 따라서 이 함수로 쓴 내용으로 캐시가 오염되지 않는다.
+    """
     path = _cache_path(url)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if _verified:
-            digest = _url_digest(url)
-            envelope = {
-                "_writer": "law_kit.client",
-                "_v": 2,
-                "url_digest": digest,
-                "body": body,
-                "empty": _is_empty_response(body),
-            }
-            content = json.dumps(envelope, ensure_ascii=False)
-        else:
-            # 밖에서 직접 호출하거나 위조된 경우: 표지를 붙이지 않아 읽힐 때 거부됨
-            content = body
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(body)
+    except OSError:
+        pass
+
+
+def _write_verified_network_cache(url, body, _key=None):
+    """실제 망 수신 경로(raw 내부 urlopen 직후)에서만 표지를 붙여 저장하는 내부 함수."""
+    if _key is not _INTERNAL_NET_KEY:
+        # 외부에서 직접 불렀으면 표지를 붙이지 않는다
+        return _cache_write(url, body)
+    path = _cache_path(url)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        digest = _url_digest(url)
+        envelope = {
+            "_writer": "law_kit.client",
+            "_v": 2,
+            "url_digest": digest,
+            "body": body,
+            "empty": _is_empty_response(body),
+        }
+        content = json.dumps(envelope, ensure_ascii=False)
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
     except OSError:
-        pass                                  # 캐시 실패로 조회를 죽이지 않는다
+        pass
 
 
 def raw(url, params, ttl=CACHE_TTL, timeout=25):
@@ -318,7 +334,7 @@ def raw(url, params, ttl=CACHE_TTL, timeout=25):
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8", "replace")
     if ttl:
-        _cache_write(full, body, _verified=True)
+        _write_verified_network_cache(full, body, _key=_INTERNAL_NET_KEY)
     return body, False
 
 
