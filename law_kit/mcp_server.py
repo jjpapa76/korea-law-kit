@@ -1531,6 +1531,13 @@ def dispatch_tool(name, args):
         )
 
         missed = list(tree_missed)
+        tree_ok = bool(dict.get(found, "ok", True))
+        tree_comp = bool(dict.get(found, "complete", True))
+        if not tree_ok or not tree_comp:
+            reason = dict.get(found, "note") or dict.get(found, "error") or "체계 조회가 온전하지 않다"
+            if reason and reason not in missed:
+                missed.insert(0, reason)
+
         if paging_missed:
             missed.extend(paging_missed)
             missed.append("법령체계(시행령·시행규칙·행정규칙)는 이 응답에 모두 들어 있다. 잘린 것은 조례 목록뿐")
@@ -1559,12 +1566,14 @@ def dispatch_tool(name, args):
             if k not in ordered_paged:
                 ordered_paged[k] = paged_counts[k]
 
+        is_tree_complete = tree_ok and tree_comp and (not tree_missed) and is_complete
+
         out = {
             "law": law,
             "total": total,
             "offset": offset_val,
             "next_offset": next_offset,
-            "complete": is_complete,
+            "complete": is_tree_complete,
             "why": " | ".join(dict.fromkeys(missed)),
             "note": dict.get(found, "note", ""),
             "counts": kit.tree.summary(found),

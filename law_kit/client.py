@@ -55,6 +55,8 @@ def setting(name):
 DELAY = 0.2
 #: 캐시 기본 수명(초). 법령은 자주 안 바뀐다.
 CACHE_TTL = 7 * 24 * 3600
+#: 0건 응답 캐시 수명(초). 일시적 누락이나 장애 대비 1시간으로 짧게 둔다.
+CACHE_TTL_EMPTY = 3600
 #: 캐시 위치. 환경변수로 옮길 수 있게 둔다 - 여러 프로그램이 **같은 곳**을
 #: 봐야 공유가 된다.
 #: 여러 에이전트가 따로 띄워도 같은 캐시를 보게 하려고.
@@ -178,28 +180,128 @@ def is_demo_key():
     return oc() == DEMO_OC
 
 
+def _url_digest(url):
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()
+
+
 def _cache_path(url):
-    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    digest = _url_digest(url)
     return os.path.join(CACHE_DIR, digest[:2], digest + ".json")
+
+
+def _is_empty_response(body):
+    """응답 본문이 0건(결과 없음)인지 검사한다."""
+    if not body:
+        return True
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(payload, dict) or not payload:
+        return True
+    root = payload[list(payload.keys())[0]]
+    if isinstance(root, str):
+        return True
+    if isinstance(root, dict):
+        total = root.get("totalCnt")
+        if total in (0, "0", "00"):
+            return True
+        for k, v in root.items():
+            if k in _META_KEYS:
+                continue
+            if isinstance(v, list) and len(v) == 0:
+                return True
+    return False
 
 
 def _cache_read(url, ttl):
     path = _cache_path(url)
     try:
-        if time.time() - os.path.getmtime(path) > ttl:
-            return None
         with open(path, encoding="utf-8") as handle:
-            return handle.read()
+            content = handle.read()
     except (OSError, ValueError):
         return None
 
+    try:
+        data = json.loads(content)
+    except Exception:
+        # JSON이 아니거나 깨진 파일: 버린다
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
 
-def _cache_write(url, body):
+    if not isinstance(data, dict):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+
+    if data.get("_writer") != "law_kit.client" or data.get("_v") != 2:
+        # 표지가 없거나 버전 불일치: 버린다
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+
+    expected_digest = _url_digest(url)
+    if data.get("url_digest") != expected_digest:
+        # 요청 URL 해시 불일치: 버린다
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+
+    body = data.get("body")
+    if body is None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+
+    # 유효기간(TTL) 검사: 0건 응답은 CACHE_TTL_EMPTY(1시간) 적용
+    is_empty = data.get("empty")
+    if is_empty is None:
+        is_empty = _is_empty_response(body)
+
+    effective_ttl = min(ttl, CACHE_TTL_EMPTY) if is_empty else ttl
+    try:
+        if time.time() - os.path.getmtime(path) > effective_ttl:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return None
+    except OSError:
+        return None
+
+    return body
+
+
+def _cache_write(url, body, _verified=False):
     path = _cache_path(url)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if _verified:
+            digest = _url_digest(url)
+            envelope = {
+                "_writer": "law_kit.client",
+                "_v": 2,
+                "url_digest": digest,
+                "body": body,
+                "empty": _is_empty_response(body),
+            }
+            content = json.dumps(envelope, ensure_ascii=False)
+        else:
+            # 밖에서 직접 호출하거나 위조된 경우: 표지를 붙이지 않아 읽힐 때 거부됨
+            content = body
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(body)
+            handle.write(content)
     except OSError:
         pass                                  # 캐시 실패로 조회를 죽이지 않는다
 
@@ -216,7 +318,7 @@ def raw(url, params, ttl=CACHE_TTL, timeout=25):
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8", "replace")
     if ttl:
-        _cache_write(full, body)
+        _cache_write(full, body, _verified=True)
     return body, False
 
 
