@@ -1600,8 +1600,9 @@ def dispatch_tool(name, args):
     elif name == "law_search":
         raw_query = args.get("query") or args.get("topic") or ""
         display = args.get("display", 20)
+        offset = args.get("offset", 0)
         cleaned_query = kit.search.clean_query(raw_query)
-        found = kit.search.across(cleaned_query, display=display)
+        found = kit.search.across(cleaned_query, display=display, offset=offset)
         axes = found.get("axes", {})
         axes_summary = {}
         for target, ax in axes.items():

@@ -62,20 +62,27 @@ _JOSA_STANDALONE = frozenset(("의", "및", "에", "에서", "을", "를", "은"
 
 
 def strip_josa(word):
-    """낱말 끝 조사를 뗀다 (의, 및, 에, 에서, 을, 를, 은, 는, 이, 가, 와, 과, 등, 으로, 로)."""
+    """낱말 끝 조사를 뗀다 (의, 및, 에, 에서, 을, 를, 은, 는, 이, 가, 와, 과, 등, 으로, 로).
+    뗀 결과가 2글자 미만이면 떼지 않는다.
+    """
     if not word:
         return ""
     w = str(word).strip()
     if w in _JOSA_STANDALONE:
         return ""
+    res = w
     if (w.endswith("에서") or w.endswith("으로")) and len(w) >= 4:
-        return w[:-2]
-    if w.endswith("로") and len(w) >= 3:
-        return w[:-1]
-    for suf in ("의", "에", "을", "를", "은", "는", "이", "가", "와", "과", "등"):
-        if w.endswith(suf) and len(w) >= 3:
-            return w[:-len(suf)]
-    return w
+        res = w[:-2]
+    elif w.endswith("로") and len(w) >= 3:
+        res = w[:-1]
+    else:
+        for suf in ("의", "에", "을", "를", "은", "는", "이", "가", "와", "과", "등"):
+            if w.endswith(suf) and len(w) >= 3:
+                res = w[:-len(suf)]
+                break
+    if len(res) < 2:
+        return w
+    return res
 
 
 def extract_keywords(query):
@@ -154,41 +161,57 @@ def _is_exact_or_word_plus_law(raw, words):
 
 
 def _law_match_count(item, tokens):
-    """검색어 토큰(및 조사를 뗀 어간)이 법령명(또는 어간)에 들어간 횟수 계산."""
+    """검색어 토큰(원래 낱말 및 조사를 뗀 낱말)의 법령명 일치 점수 계산.
+    원래 낱말과 뗀 낱말을 둘 다 쓰되 원래 낱말 일치를 먼저 친다.
+    """
     name = str(item.get("법령명한글") or item.get("법령명") or _title(item))
     core = _get_law_name_core(name)
     count = 0
     for t in tokens:
-        if not t:
+        if not t or t in _JOSA_STANDALONE:
             continue
         stripped = strip_josa(t)
-        candidates = [t]
+        # 1. 원래 낱말 일치 (가장 우선)
+        orig_matched = False
+        if t in name:
+            orig_matched = True
+        elif len(core) >= 2 and core in t:
+            orig_matched = True
+
+        if orig_matched:
+            count += 10
+            continue
+
+        # 2. 뗀 낱말 및 어간 일치
+        stripped_matched = False
+        candidates = []
         if stripped and stripped != t:
             candidates.append(stripped)
-        matched = False
+        if len(t) >= 3:
+            candidates.append(t[:-1])
+            candidates.append(t[:2])
+
         for c in candidates:
+            if not c or len(c) < 2:
+                continue
             if c in name:
-                matched = True
+                stripped_matched = True
                 break
             if len(core) >= 2 and core in c:
-                matched = True
+                stripped_matched = True
                 break
-            if len(c) >= 3 and c[:-1] in name:
-                matched = True
+            if len(c) >= 2 and (name.startswith(c) or (c + "법") in name):
+                stripped_matched = True
                 break
-            if len(c) >= 3:
-                stem2 = c[:2]
-                if stem2 in name or name.startswith(stem2):
-                    matched = True
-                    break
-        if matched:
-            count += 1
+
+        if stripped_matched:
+            count += 3
 
     # 법률 핵심 도메인 연계 가산점
     if any("주민등록번호" in t for t in tokens) and "개인정보" in name:
-        count += 2
+        count += 20
     if any(k in t for t in tokens for k in ("사전통지", "의견청취")) and "행정절차법" in name:
-        count += 2
+        count += 20
 
     return count
 
@@ -206,87 +229,35 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
         offset_val = int(offset or 0)
     except (TypeError, ValueError):
         offset_val = 0
+    if offset_val < 0:
+        offset_val = 0
 
     try:
         req_display = int(display or 20)
     except (TypeError, ValueError):
         req_display = 20
+    if req_display <= 0:
+        req_display = 20
 
     is_law_body = (target == "law" and (search_mode in (2, "2") or params.get("search") in (2, "2")))
-    is_prec_body = (target == "prec" and (search_mode in (2, "2") or params.get("search") in (2, "2")))
-    call_params = dict(params)
-    if is_law_body or is_prec_body:
+    if is_law_body:
+        call_params = dict(params)
         call_params.pop("offset", None)
         call_params["page"] = 1
         call_display = 100
-    else:
-        call_display = display
 
-    result = client.call(target, query=query, display=call_display, ttl=ttl,
-                         **call_params)
-    rows = []
-    for item in result.partial:
-        if not isinstance(item, dict):
-            continue
-        rows.append({"제목": _title(item), "raw": item})
+        result = client.call(target, query=query, display=call_display, ttl=ttl,
+                             **call_params)
+        rows = []
+        for item in result.partial:
+            if not isinstance(item, dict):
+                continue
+            rows.append({"제목": _title(item), "raw": item})
 
-    try:
-        expected = int(result.total or 0)
-    except (TypeError, ValueError):
-        expected = 0
-
-    if is_prec_body and rows:
-        tokens = clean_query(query).split()
-        def prec_sort_key(entry):
-            idx, r = entry
-            raw = r.get("raw") or {}
-            score = 0
-            ptype = str(raw.get("판결유형") or "")
-            cname = str(raw.get("사건명") or "")
-            court = str(raw.get("법원명") or "")
-            if "전원합의체" in ptype or "전원합의체" in tokens:
-                if "전원합의체" in ptype:
-                    score += 50
-            if "대법원" in court:
-                score += 10
-            for t in tokens:
-                if not t:
-                    continue
-                stripped_t = strip_josa(t)
-                if stripped_t and stripped_t in cname:
-                    score += 8
-                elif t in cname:
-                    score += 5
-                elif len(t) >= 3 and t[:-1] in cname:
-                    score += 3
-            return (-score, idx)
-        indexed = list(enumerate(rows))
-        indexed.sort(key=prec_sort_key)
-        sorted_rows = [r for _, r in indexed]
-        sorted_len = len(sorted_rows)
-        paged_rows = sorted_rows[offset_val : offset_val + req_display]
-        paged_count = len(paged_rows)
-        next_offset = (offset_val + req_display) if (offset_val + req_display < sorted_len) else None
-        is_unknown_total = (result.total is None or str(result.total).strip() == "" or expected == 0)
-        is_cap = (expected > sorted_len) or (is_unknown_total and sorted_len >= 100)
-        complete = not is_cap and result.complete
-        note = result.why_incomplete() if not complete else ""
-        ans_data = {
-            "target": target,
-            "ok": result.ok,
-            "complete": complete,
-            "total": result.total,
-            "count": paged_count,
-            "items": paged_rows,
-            "note": note,
-            "why": note,
-            "cached": result.cached,
-        }
-        if next_offset is not None:
-            ans_data["next_offset"] = next_offset
-        return Answer(ans_data)
-
-    if is_law_body:
+        try:
+            expected = int(result.total or 0)
+        except (TypeError, ValueError):
+            expected = 0
         # 다. offset >= 100 이면 재정렬하지 않고 도구 오류가 아니라 complete:false + why "재정렬은 앞 100건까지다. 범위를 좁혀 다시 물어라" (항목 0).
         if offset_val >= 100:
             why_msg = "재정렬은 앞 100건까지다. 범위를 좁혀 다시 물어라"
@@ -306,25 +277,36 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
 
         # 가. 법령 축 본문검색을 할 때, 검색어 낱말 중 2글자 이상 앞 3개까지 각각 법령명 검색(search=1, display 100)을 한 번씩 더 해서, 법령명이 그 낱말을 포함하는 법령을 모은다.
         tokens = clean_query(query).split()
-        keywords = extract_keywords(query)
-        words = keywords[:3] if keywords else [w for w in tokens if len(w) >= 2][:3]
+        orig_words = [w for w in tokens if w not in _JOSA_STANDALONE and len(w) >= 2][:3]
+        words = list(orig_words)
+        for w in orig_words:
+            s = strip_josa(w)
+            if s and s != w and s not in words and len(s) >= 2:
+                words.append(s)
         stop_nouns = frozenset(("처리", "제한", "기준", "설치", "관리", "방법", "절차", "규정", "운영"))
 
         word_rows = []
         seen_word_queries = set()
-        for w in words:
-            if not w or w in stop_nouns:
-                continue
-            # 낱말 끝 어미/접미사 및 어간 변환 (건축물 -> 건축, 행정처분 -> 행정 등)
-            if w.endswith("물") and len(w) >= 3:
-                q_w = w[:-1]
-            elif w.endswith("처분") and len(w) >= 4:
-                q_w = w[:-2]
-            elif w.startswith("주민등록"):
-                q_w = "주민등록"
-            else:
-                q_w = w
 
+        search_candidates = []
+        for t in orig_words:
+            if t not in stop_nouns:
+                search_candidates.append(t)
+            s = strip_josa(t)
+            if s and s != t and s not in stop_nouns and s not in search_candidates:
+                search_candidates.append(s)
+            cand_base = s if (s and s != t) else t
+            stem_cand = None
+            if cand_base.endswith("물") and len(cand_base) >= 3:
+                stem_cand = cand_base[:-1]
+            elif cand_base.endswith("처분") and len(cand_base) >= 4:
+                stem_cand = cand_base[:-2]
+            elif cand_base.startswith("주민등록"):
+                stem_cand = "주민등록"
+            if stem_cand and stem_cand not in stop_nouns and stem_cand not in search_candidates:
+                search_candidates.append(stem_cand)
+
+        for q_w in search_candidates:
             if q_w in seen_word_queries:
                 continue
             seen_word_queries.add(q_w)
@@ -336,10 +318,10 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
                 if not isinstance(it, dict):
                     continue
                 t_name = str(it.get("법령명한글") or it.get("법령명") or _title(it)).strip()
-                stems = get_stems(w)
+                stems = get_stems(q_w)
                 is_exact_act = _is_exact_or_word_plus_law(it, words)
                 matched = is_exact_act
-                if not matched and w not in stop_nouns and w in t_name:
+                if not matched and q_w not in stop_nouns and q_w in t_name:
                     matched = True
                 if not matched:
                     for s in stems:
@@ -488,26 +470,119 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
             ans_data["next_offset"] = next_offset
         return Answer(ans_data)
 
-    # **display 상한에 걸린 것은 완전한 것이 아니다.**
-    # 서버는 "총 340건 중 20건" 을 순순히 준다. 그 20건만 보고 complete
-    # 라고 말하면, 부르는 쪽은 340건을 다 본 줄 안다. 실측에서 '법령 축
-    # 20건 확인' 이 그렇게 나왔다 - 실제로는 앞 20건이었다.
-    complete, note = result.complete, result.why_incomplete()
-    if complete and expected > len(rows):
-        complete = False
-        note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
-                "전수가 필요하면 all_pages() 를 쓰라" % (expected, len(rows), display))
-    elif complete and not expected and len(rows) >= int(display or 0) > 0:
-        # 총건수를 안 준 축이 있다(판례 등). 그때 display 를 정확히 채워
-        # 돌아왔다면 **뒤가 더 있는지 알 수 없다.** 모르는 것을 완전하다고
-        # 말하지 않는다.
-        complete = False
-        note = ("총건수를 주지 않는 축이다. display=%s 를 가득 채워 왔으니 "
-                "뒤가 더 있는지 알 수 없다. 전수가 필요하면 all_pages() 를 쓰라"
-                % display)
-    return Answer({"target": target, "ok": result.ok, "complete": complete,
-                   "total": result.total, "count": len(rows), "items": rows,
-                   "note": note, "cached": result.cached})
+    # 법령 축 본문검색이 아닌 모든 축: 법제처 쪽수 페이징 (ordin, admrul, prec, detc, expc 등)
+    start_page = (offset_val // req_display) + 1
+    end_page = ((offset_val + req_display - 1) // req_display) + 1
+
+    call_params = dict(params)
+    call_params.pop("page", None)
+    call_params.pop("offset", None)
+    call_params.pop("display", None)
+
+    all_raw_items = []
+    first_result = None
+    all_cached = True
+    failed_result = None
+
+    for p in range(start_page, end_page + 1):
+        res_p = client.call(target, query=query, display=req_display, page=p, ttl=ttl, **call_params)
+        if first_result is None:
+            first_result = res_p
+        if not res_p.cached:
+            all_cached = False
+        if not res_p.ok:
+            failed_result = res_p
+            break
+        items_p = [it for it in res_p.partial if isinstance(it, dict)]
+        all_raw_items.extend(items_p)
+        if len(items_p) < req_display:
+            break
+
+    if failed_result is not None:
+        err_msg = failed_result.why_incomplete()
+        return Answer({
+            "target": target,
+            "ok": False,
+            "complete": False,
+            "total": failed_result.total,
+            "count": 0,
+            "items": [],
+            "note": err_msg,
+            "why": err_msg,
+            "cached": all_cached,
+        })
+
+    slice_start = offset_val - (start_page - 1) * req_display
+    paged_raw_items = all_raw_items[slice_start : slice_start + req_display]
+    rows = [{"제목": _title(it), "raw": it} for it in paged_raw_items]
+    paged_count = len(rows)
+
+    orig_total = first_result.total if (first_result is not None) else None
+    try:
+        expected = int(orig_total or 0)
+    except (TypeError, ValueError):
+        expected = 0
+
+    if expected > 0:
+        if offset_val + paged_count < expected:
+            next_offset = offset_val + paged_count
+        else:
+            next_offset = None
+    else:
+        if expected == 0 and orig_total in (0, "0"):
+            next_offset = None
+        elif paged_count >= req_display and paged_count > 0:
+            next_offset = offset_val + paged_count
+        else:
+            next_offset = None
+
+    complete = True
+    note = ""
+    why = ""
+    if expected > 0:
+        if expected > (offset_val + paged_count):
+            complete = False
+            note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
+                    "전수가 필요하면 all_pages() 를 쓰라" % (expected, offset_val + paged_count, req_display))
+            why = note
+        elif (first_result is not None) and not first_result.complete and not first_result.truncated:
+            complete = False
+            why = first_result.why_incomplete()
+            note = why
+        else:
+            complete = True
+            note = ""
+            why = ""
+    else:
+        if not expected and paged_count >= req_display > 0:
+            complete = False
+            note = ("총건수를 주지 않는 축이다. display=%s 를 가득 채워 왔으니 "
+                    "뒤가 더 있는지 알 수 없다. 전수가 필요하면 all_pages() 를 쓰라"
+                    % req_display)
+            why = note
+        elif (first_result is not None) and not first_result.complete and not first_result.truncated:
+            complete = False
+            why = first_result.why_incomplete()
+            note = why
+        else:
+            complete = True
+            note = ""
+            why = ""
+
+    ans_data = {
+        "target": target,
+        "ok": True,
+        "complete": complete,
+        "total": orig_total,
+        "count": paged_count,
+        "items": rows,
+        "note": note,
+        "why": why,
+        "cached": all_cached,
+    }
+    if next_offset is not None:
+        ans_data["next_offset"] = next_offset
+    return Answer(ans_data)
 
 
 def all_pages(target, query, max_pages=40, search_mode=None, ttl=client.CACHE_TTL,
@@ -542,8 +617,8 @@ def across(query, axes=AXES, display=20, name_first=True, body_fallback=True,
 
     out = {}
     tokens = clean_query(query).split()
-    keywords = extract_keywords(query)
-    base_words = keywords if len(keywords) >= 3 else [w for w in tokens if len(w) >= 2]
+    raw_words = [t for t in tokens if t not in _JOSA_STANDALONE and len(t) >= 2]
+    base_words = raw_words if raw_words else [w for w in tokens if len(w) >= 2]
     word_count = len(base_words)
 
     fetch = (lambda t, m=None: all_pages(t, query, search_mode=m, **extra)) if exhaustive else (
@@ -561,9 +636,8 @@ def across(query, axes=AXES, display=20, name_first=True, body_fallback=True,
 
         # 결함 (1): 낱말이 3개 이상인 검색이 어떤 축에서 0건이면,
         # 앞 2~3개 핵심 낱말로 줄인 재검색을 한 번 더 하고 ("검색어_정리" 에 기록).
-        # 그래도 0이면 그 축은 "0건 - 낱말을 줄여 다시 물어라" 안내를 단다.
-        # 낱말이 많은 검색의 0건은 complete:true 라도 축별 안내에
-        # "모든 낱말이 들어간 결과가 없다는 뜻이다. 없다고 단정하지 마라" 를 넣는다.
+        # 줄인 검색을 쓴 축은 complete:false + why 안내.
+        # 그래도 0이면 그 축은 complete:false + "모든 낱말이 들어간 결과가 0건이다..."
         if found["ok"] and found["count"] == 0 and word_count >= 3:
             reduce_len = 3 if len(base_words) >= 4 else 2
             reduced_words = base_words[:reduce_len]
@@ -583,13 +657,19 @@ def across(query, axes=AXES, display=20, name_first=True, body_fallback=True,
 
             if re_found["ok"] and re_found["count"] > 0:
                 found = re_found
+                dict.__setitem__(found, "complete", False)
+                why_msg = ("원래 검색어 '%s' 로는 0건이라 '%s' 로 줄여 찾았다 - "
+                           "원래 조건을 모두 만족하는지는 확인하지 않았다" % (query, reduced_query))
+                dict.__setitem__(found, "why", why_msg)
+                dict.__setitem__(found, "note", why_msg)
                 dict.__setitem__(found, "검색어_정리", reduced_query)
             else:
+                dict.__setitem__(found, "complete", False)
+                why_msg = "모든 낱말이 들어간 결과가 0건이다. 없다고 단정하지 마라 - 낱말을 줄여 다시 물어라"
+                dict.__setitem__(found, "why", why_msg)
+                dict.__setitem__(found, "note", why_msg)
                 dict.__setitem__(found, "검색어_정리", reduced_query)
-                guide_msg = "0건 - 낱말을 줄여 다시 물어라. 모든 낱말이 들어간 결과가 없다는 뜻이다. 없다고 단정하지 마라"
-                dict.__setitem__(found, "안내", guide_msg)
-                if not found.get("note"):
-                    dict.__setitem__(found, "note", guide_msg)
+                dict.__setitem__(found, "안내", why_msg)
 
         if found["count"] == 0 and word_count >= 3:
             if "안내" not in found:

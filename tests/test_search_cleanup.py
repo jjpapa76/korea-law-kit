@@ -141,7 +141,7 @@ def test_law_search_query_cleanup_and_article_guide(monkeypatch):
     """과업 (2) 검색어 정리: 따옴표 제거 질의 전달, 응답 머리 '검색어_정리' 및 '안내'(law_article) 확인."""
     passed_calls = []
 
-    def fake_across(query, display=20):
+    def fake_across(query, display=20, *args, **kwargs):
         passed_calls.append((query, display))
         return {
             "axes": {
@@ -189,7 +189,7 @@ def test_law_search_plain_query_no_cleanup(monkeypatch):
     monkeypatch.setattr(
         kit.search,
         "across",
-        lambda query, display=20: {
+        lambda query, display=20, *args, **kwargs: {
             "axes": {
                 "law": {
                     "label": "법령",
@@ -262,10 +262,24 @@ def test_case_search_zero_retry_and_guide(monkeypatch):
     prec_axis = out["axes"]["prec"]
     assert prec_axis["count"] == 1
     assert prec_axis.get("검색어_정리") == "통상임금 정기성 일률성"
+    assert prec_axis["complete"] is False
+    expected_why = ("원래 검색어 '통상임금 정기성 일률성 고정성 전원합의체' 로는 0건이라 "
+                    "'통상임금 정기성 일률성' 로 줄여 찾았다 - 원래 조건을 모두 만족하는지는 확인하지 않았다")
+    assert prec_axis["why"] == expected_why
+    assert "prec" in out["incomplete"]
     items = prec_axis.partial("items")
     assert items[0]["raw"]["사건번호"] == "2012다89399"
 
-    # 2. 재검색 후에도 0건인 케이스 -> 안내 문구 확인
+    # MCP 도구 및 최상위 complete, 축별 머리 요약 일치 검증
+    dispatched = mcp_server.dispatch_tool("law_search", {"query": "통상임금 정기성 일률성 고정성 전원합의체"})
+    assert dispatched["축별"]["판례"]["complete"] is False
+    serialized = mcp_server.serialize_response(dispatched)
+    parsed = json.loads(serialized)
+    assert parsed["complete"] is False
+    if "축별" in parsed and parsed["축별"]:
+        assert parsed["축별"]["판례"]["complete"] is False
+
+    # 2. 재검색 후에도 0건인 케이스 -> complete:false 및 why 확인
     def fake_call_always_zero(target, query=None, display=20, search=None, **params):
         return Result(target, ok=True, complete=True, items=[], total=0)
 
@@ -279,8 +293,19 @@ def test_case_search_zero_retry_and_guide(monkeypatch):
     prec_zero = out_zero["axes"]["prec"]
     assert prec_zero["count"] == 0
     assert "검색어_정리" in prec_zero
-    assert "0건 - 낱말을 줄여 다시 물어라" in prec_zero.get("안내", "")
-    assert "모든 낱말이 들어간 결과가 없다는 뜻이다. 없다고 단정하지 마라" in prec_zero.get("안내", "")
+    assert prec_zero["complete"] is False
+    expected_zero_why = "모든 낱말이 들어간 결과가 0건이다. 없다고 단정하지 마라 - 낱말을 줄여 다시 물어라"
+    assert prec_zero["why"] == expected_zero_why
+    assert "prec" in out_zero["incomplete"]
+
+    # MCP 도구 및 최상위 complete, 축별 머리 요약 일치 검증
+    dispatched_zero = mcp_server.dispatch_tool("law_search", {"query": "존재하지 않는 가상의 판례 낱말들"})
+    assert dispatched_zero["축별"]["판례"]["complete"] is False
+    serialized_zero = mcp_server.serialize_response(dispatched_zero)
+    parsed_zero = json.loads(serialized_zero)
+    assert parsed_zero["complete"] is False
+    if "축별" in parsed_zero and parsed_zero["축별"]:
+        assert parsed_zero["축별"]["판례"]["complete"] is False
 
 
 def test_statute_search_ranking_fixture(monkeypatch):
@@ -338,4 +363,173 @@ def test_statute_search_ranking_fixture(monkeypatch):
     items3 = res3.partial("items")
     top_titles3 = [it["제목"] for it in items3[:5]]
     assert "행정절차법" in top_titles3
+
+
+def test_strip_josa_rules_and_minimum_length():
+    """조사 떼기 규칙 검증: 뗀 결과가 2글자 미만이면 떼지 않고, 원문 보존."""
+    # 뗀 결과가 2글자 미만이면 떼지 않음
+    assert kit.search.strip_josa("차로") == "차로"
+    assert kit.search.strip_josa("비가") == "비가"
+    assert kit.search.strip_josa("해로") == "해로"
+
+    # 조사가 붙은 단어는 정상 분리
+    assert kit.search.strip_josa("건축물의") == "건축물"
+    assert kit.search.strip_josa("도로에서") == "도로"
+    assert kit.search.strip_josa("기준으로") == "기준"
+
+
+def test_children_playground_safety_act_fixture(monkeypatch):
+    """시험: fixture로 '어린이 놀이시설 안전관리' 검색 시 원문 검색어 보존 및 어린이놀이시설 안전관리법 상위 5개 포함 검증."""
+    queries_called = []
+
+    def fake_call(target, query=None, display=20, search=None, **params):
+        s = str(search) if search is not None else ""
+        queries_called.append((target, query, s))
+        if target == "law":
+            if s == "2" and query == "어린이 놀이시설 안전관리":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "도시공원 및 녹지 등에 관한 법률", "법령구분명": "법률"},
+                    {"법령명한글": "어린이놀이시설 안전관리법", "법령구분명": "법률"},
+                    {"법령명한글": "재난 및 안전관리 기본법", "법령구분명": "법률"},
+                ], total=3)
+            if s == "1" and query == "어린이":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "어린이놀이시설 안전관리법", "법령구분명": "법률"},
+                    {"법령명한글": "어린이놀이시설 안전관리법 시행령", "법령구분명": "대통령령"},
+                    {"법령명한글": "어린이식생활안전관리특별법", "법령구분명": "법률"},
+                ], total=3)
+            if s == "1" and query == "놀이시설":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "어린이놀이시설 안전관리법", "법령구분명": "법률"},
+                ], total=1)
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. 법제처 본문검색에 전송된 쿼리가 원문 '어린이 놀이시설 안전관리' 그대로인지 확인
+    res = kit.search.one("law", "어린이 놀이시설 안전관리", display=20, search_mode=2)
+    assert any(q == "어린이 놀이시설 안전관리" and s == "2" for _, q, s in queries_called)
+
+    # 2. 낱말별 법령명 검색(search=1)에서 '어린'이 아닌 원래 낱말 '어린이'로 검색되었는지 확인
+    assert any(q == "어린이" and s == "1" for _, q, s in queries_called)
+
+    # 3. 상위 5개에 '어린이놀이시설 안전관리법' 포함 확인
+    items = res.partial("items")
+    top_titles = [it["제목"] for it in items[:5]]
+    assert "어린이놀이시설 안전관리법" in top_titles
+    assert items[0]["제목"] == "어린이놀이시설 안전관리법"
+
+
+def test_parking_act_regression_fixture(monkeypatch):
+    """시험: fixture로 '주차장 설치 기준' -> 주차장법 1위 회귀 검증."""
+    def fake_call(target, query=None, display=20, search=None, **params):
+        s = str(search) if search is not None else ""
+        if target == "law":
+            if s == "2" and query == "주차장 설치 기준":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "주차장법 시행령", "법령구분명": "대통령령"},
+                    {"법령명한글": "주차장법", "법령구분명": "법률"},
+                ], total=2)
+            if s == "1" and query == "주차장":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "주차장법", "법령구분명": "법률"},
+                    {"법령명한글": "주차장법 시행규칙", "법령구분명": "부령"},
+                ], total=2)
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    res = kit.search.one("law", "주차장 설치 기준", display=20, search_mode=2)
+    items = res.partial("items")
+    assert items[0]["제목"] == "주차장법"
+
+
+def test_non_law_axes_paging_and_offset_fixtures(monkeypatch):
+    """시험: 가짜 응답으로 축별 offset 0/20/37, display 20 에서 쪽 번호·자르기·next_offset 산술, 이어 붙였을 때 중복 0."""
+    total_mock_count = 100
+    mock_db = [{"자치법규명": "조례_%03d" % i,
+                "행정규칙명": "훈령_%03d" % i,
+                "사건명": "판례_%03d" % i,
+                "안건명": "해석례_%03d" % i,
+                "제목": "결정례_%03d" % i,
+                "일련번호": i} for i in range(total_mock_count)]
+
+    called_pages = []
+
+    def fake_call(target, query=None, display=20, page=1, **params):
+        p = int(page or 1)
+        d = int(display or 20)
+        called_pages.append((target, p, d))
+        start_idx = (p - 1) * d
+        end_idx = p * d
+        page_items = mock_db[start_idx:end_idx]
+        return Result(target, ok=True, complete=True, items=page_items, total=total_mock_count)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    for target in ("ordin", "admrul", "prec", "detc", "expc"):
+        # 1. offset = 0, display = 20
+        called_pages.clear()
+        res0 = kit.search.one(target, "검색어", display=20, offset=0)
+        items0 = res0.partial("items")
+        assert len(items0) == 20
+        assert res0.get("next_offset") == 20
+        assert res0.get("total") == 100
+        # 쪽 번호 1만 호출됨
+        assert called_pages == [(target, 1, 20)]
+        ids0 = [it["raw"]["일련번호"] for it in items0]
+        assert ids0 == list(range(0, 20))
+
+        # 2. offset = 20, display = 20
+        called_pages.clear()
+        res20 = kit.search.one(target, "검색어", display=20, offset=20)
+        items20 = res20.partial("items")
+        assert len(items20) == 20
+        assert res20.get("next_offset") == 40
+        assert res20.get("total") == 100
+        # 쪽 번호 2만 호출됨
+        assert called_pages == [(target, 2, 20)]
+        ids20 = [it["raw"]["일련번호"] for it in items20]
+        assert ids20 == list(range(20, 40))
+
+        # 이어 붙였을 때 중복 0 확인
+        combined_ids = ids0 + ids20
+        assert len(combined_ids) == 40
+        assert len(set(combined_ids)) == 40
+        assert len(set(ids0) & set(ids20)) == 0
+
+        # 3. offset = 37, display = 20 (쪽 번호 2, 3 호출 및 잘라내기 검증)
+        called_pages.clear()
+        res37 = kit.search.one(target, "검색어", display=20, offset=37)
+        items37 = res37.partial("items")
+        assert len(items37) == 20
+        assert res37.get("next_offset") == 57
+        assert res37.get("total") == 100
+        # 쪽 번호 2와 3이 호출됨
+        assert called_pages == [(target, 2, 20), (target, 3, 20)]
+        ids37 = [it["raw"]["일련번호"] for it in items37]
+        # 인덱스 37부터 56까지 정확히 잘렸는지 검증
+        assert ids37 == list(range(37, 57))
+
+
+def test_mcp_server_law_search_offset_dispatch(monkeypatch):
+    """MCP law_search 도구에서 offset 인자가 across 에 정확히 전달되는지 검증."""
+    received_offset = []
+
+    def fake_across(query, display=20, offset=0, **extra):
+        received_offset.append((query, display, offset))
+        return {
+            "query": query,
+            "axes": {
+                "ordin": kit.shape.Answer({"target": "ordin", "label": "자치법규", "complete": False, "total": 100, "count": 20, "next_offset": offset + 20, "items": []})
+            },
+            "incomplete": ["ordin"]
+        }
+
+    monkeypatch.setattr(kit.search, "across", fake_across)
+    out = mcp_server.dispatch_tool("law_search", {"query": "주차장", "display": 20, "offset": 20})
+    assert received_offset == [("주차장", 20, 20)]
+    assert out["axes"]["ordin"]["next_offset"] == 40
+
+
 
