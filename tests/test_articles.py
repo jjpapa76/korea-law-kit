@@ -245,7 +245,25 @@ def test_law_article_multiple_candidates(monkeypatch):
 # ---------------------------------------------------------------- 6. 조문 없음 vs 조회 실패
 def test_law_article_not_found_vs_failure(monkeypatch):
     """조문 없음(complete: true)과 원 응답 판독 불가/실패(complete: false)를 명확히 구분한다."""
-    # (1) 조문 없음: 기본정보는 정상이지만 조문 단위가 없는 경우 -> complete: True, status="조문 없음"
+    # (1) 조문 없음: 다른 조문은 존재하나 요청한 조문(99조)이 없는 경우 -> complete: True, status="조문 없음"
+    other_jo_payload = {
+        "기본정보": {"법령명_한글": "공공감사에 관한 법률", "시행일자": "20260102"},
+        "조문": {
+            "조문단위": [
+                {"조문번호": "1", "조문여부": "조문", "조문제목": "목적", "조문내용": "제1조 (목적)"}
+            ]
+        }
+    }
+    monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
+        "law", ok=True, complete=True, items=[other_jo_payload]
+    ))
+    res_not_found = articles.get_article("123456", "99")
+    assert res_not_found["complete"] is True
+    assert res_not_found["status"] == "조문 없음"
+    assert "조문(99)이 없습니다" in res_not_found["why"]
+    assert res_not_found["조번호"] == ""
+
+    # (1-2) 거짓 단정 금지: 본문에 조문단위가 아예 없고 앞 판도 없는 경우 -> complete: False
     empty_jo_payload = {
         "기본정보": {"법령명_한글": "공공감사에 관한 법률", "시행일자": "20260102"},
         # 조문 키 자체가 없거나 조문단위가 없음
@@ -253,11 +271,12 @@ def test_law_article_not_found_vs_failure(monkeypatch):
     monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
         "law", ok=True, complete=True, items=[empty_jo_payload]
     ))
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": []
+    }))
     res_empty = articles.get_article("123456", "99")
-    assert res_empty["complete"] is True
-    assert res_empty["status"] == "조문 없음"
-    assert "조문(99)이 없습니다" in res_empty["why"]
-    assert res_empty["조번호"] == ""
+    assert res_empty["complete"] is False
+    assert "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다" in res_empty["why"]
 
     # (2) 조회 실패: client.call 이 ok=False 인 경우 -> complete: False
     monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
@@ -602,7 +621,7 @@ def test_fixture_urban_plan_act_art1_historic(monkeypatch):
     urban_last_payload = _load_fixture("urban_plan_act_art1.json")
     urban_hist_payload = _load_fixture("urban_plan_act_art1_hist.json")
 
-    # Case A: 마지막 판(57195) 본문은 정상 수신했으나 조문이 없는 판본 -> complete: true, 조문 없음
+    # Case A: 마지막 판(57195) 본문에 조문이 없고 앞 판을 찾지 못했을 때 -> complete: false, 거짓 단정 금지
     monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
         {"법령명": "도시계획법", "MST": "57195", "현행": "연혁", "찾은방법": "historic", "시행일자": "20030101"}
     ])
@@ -615,10 +634,30 @@ def test_fixture_urban_plan_act_art1_historic(monkeypatch):
     ))
 
     res_last = articles.get_article("도시계획법", "제1조")
-    assert res_last["complete"] is True
-    assert res_last["status"] == "조문 없음"
+    assert res_last["complete"] is False
+    assert "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다" in res_last["why"]
     assert res_last.get("구법") is True
-    assert res_last.get("안내") == "이 판(시행 20030101)에 그 조문이 없다"
+
+    # Case A-1: 마지막 판(57195)에 조문이 없으나 versions 에 앞 판(8776)이 있는 경우 -> 폐지 판 건너뛰어 추출 성공
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True,
+        "versions": [
+            {"법령명": "도시계획법", "MST": "57195", "시행일자": "20030101", "제개정": "타법폐지", "상태": "연혁"},
+            {"법령명": "도시계획법", "MST": "8776", "시행일자": "20000701", "제개정": "전부개정", "상태": "연혁"}
+        ]
+    }))
+    def fake_call_skip(target, service=False, **params):
+        if params.get("MST") == "8776":
+            return Result("eflaw", ok=True, complete=True, items=urban_hist_payload)
+        return Result("eflaw", ok=True, complete=True, items=urban_last_payload)
+    monkeypatch.setattr(kit.client, "call", fake_call_skip)
+
+    res_skip = articles.get_article("도시계획법", "제1조")
+    assert res_skip["complete"] is True
+    assert res_skip.get("구법") is True
+    assert res_skip["조번호"] == "제1조"
+    assert res_skip["조문제목"] == "목적"
+    assert "도시계획의 수립 및 집행에 관하여" in res_skip["조문내용"]
 
     # Case A-2: 본문 자체를 못 받았을 때(ok=False) -> complete: false
     monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
@@ -845,4 +884,74 @@ def test_historic_law_guide_types_abolished_vs_renamed(monkeypatch):
     assert res_no_next["complete"] is True
     assert res_no_next.get("구법") is True
     assert res_no_next.get("안내") == "현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라"
+
+
+def test_fixture_key_removal_skip_repealed_to_previous(monkeypatch):
+    """fixture(키 지우기)로 폐지 판 건너뛰기 시험:
+    폐지 판 본문 응답에서 조문 키가 아예 없거나 None일 때,
+    '조문 없음'으로 단정하지 않고 시간상 직전 판으로 건너뛰어 조문을 가져온다.
+    """
+    urban_last_payload = _load_fixture("urban_plan_act_art1.json")
+    urban_hist_payload = _load_fixture("urban_plan_act_art1_hist.json")
+
+    # 폐지 판 fixture 에서 '조문' 키 완전히 제거
+    stripped_last_payload = []
+    for item in urban_last_payload:
+        copied = dict(item)
+        copied.pop("조문", None)
+        stripped_last_payload.append(copied)
+
+    monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
+        {"법령명": "도시계획법", "MST": "57195", "현행": "연혁", "찾은방법": "historic", "시행일자": "20030101"}
+    ])
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True,
+        "versions": [
+            {"법령명": "도시계획법", "MST": "57195", "시행일자": "20030101", "제개정": "타법폐지", "상태": "연혁"},
+            {"법령명": "도시계획법", "MST": "8776", "시행일자": "20000701", "제개정": "전부개정", "상태": "연혁"}
+        ]
+    }))
+
+    def fake_call(target, service=False, **params):
+        if str(params.get("MST")) == "8776":
+            return Result("eflaw", ok=True, complete=True, items=urban_hist_payload)
+        return Result("eflaw", ok=True, complete=True, items=stripped_last_payload)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    res = articles.get_article("도시계획법", "제1조")
+    assert res["complete"] is True
+    assert res.get("status") != "조문 없음"
+    assert "status" not in res
+    assert res["MST"] == "8776"
+    assert res["조번호"] == "제1조"
+    assert res["조문제목"] == "목적"
+    assert "도시계획의 수립 및 집행에 관하여" in res["조문내용"]
+
+
+def test_repealed_version_without_previous_never_claims_no_jo(monkeypatch):
+    """'조문 없음' 거짓 단정 금지 시험:
+    폐지 판 본문에 조문이 하나도 없고 앞 판도 찾지 못하면,
+    절대 '조문 없음'(complete: true)으로 내지 않고 complete: false 와 사유를 밝힌다.
+    """
+    stripped_payload = [{"기본정보": {"법령명_한글": "도시재개발법", "시행일자": "20030701"}}]
+
+    monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
+        {"법령명": "도시재개발법", "MST": "58819", "현행": "연혁", "찾은방법": "historic", "시행일자": "20030701"}
+    ])
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True,
+        "versions": [
+            {"법령명": "도시재개발법", "MST": "58819", "시행일자": "20030701", "제개정": "타법폐지", "상태": "연혁"}
+        ]
+    }))
+    monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
+        "eflaw", ok=True, complete=True, items=stripped_payload
+    ))
+
+    res = articles.get_article("도시재개발법", "제1조")
+    assert res["complete"] is False
+    assert res.get("status") != "조문 없음"
+    assert res["why"] == "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다"
+
 

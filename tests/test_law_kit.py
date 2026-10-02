@@ -792,6 +792,10 @@ def _old_law(monkeypatch, body):
     seen = {}
 
     def fake_call(target, service=False, **params):
+        if target == "law":
+            q = params.get("query", "")
+            if "".join(str(q).split()) == "국토의계획및이용에관한법률":
+                return client.Result("law", items=[{"법령명한글": "국토의 계획 및 이용에 관한 법률"}], total=1)
         seen.update(params)
         return body
     monkeypatch.setattr(client, "call", fake_call)
@@ -805,7 +809,8 @@ def test_successor_sends_efyd_and_reads_the_abolishing_law(monkeypatch):
     seen = _old_law(monkeypatch, body)
     found = history.successor("도시계획법")
     assert seen.get("efYd") == "20030101"
-    assert found["candidates"] == ["국토의계획및이용에관한법률"]
+    assert found["candidates"] == ["국토의 계획 및 이용에 관한 법률"]
+    assert found["complete"] is True
 
 
 def test_successor_body_failure_is_not_zero_candidates(monkeypatch):
@@ -817,6 +822,35 @@ def test_successor_body_failure_is_not_zero_candidates(monkeypatch):
 def test_successor_without_hints_is_unknown(monkeypatch):
     _old_law(monkeypatch, client.Result("eflaw", items=[{"조문": "폐지한다"}], total=1))
     assert history.successor("도시계획법")["complete"] is False
+
+
+def test_successor_from_same_law_id_history(monkeypatch):
+    """부칙에 승계 법명이 없어도 연혁에서 동일 법령ID 제명변경 판을 찾아 후보로 제시한다 (예: 풍수해대책법 -> 자연재해대책법)."""
+    monkeypatch.setattr(history, "is_current", lambda n: (False, "구법"))
+    monkeypatch.setattr(history, "versions", lambda n: shape.Answer({
+        "complete": True, "versions": [{"MST": "4237", "ID": "000959", "시행일자": "19910201"}]}))
+
+    def fake_call(target, service=False, **params):
+        if service:
+            # 본문에는 아무 힌트 없음
+            return client.Result("eflaw", items=[{"기본정보": {"법령명_한글": "풍수해대책법"}}], total=1)
+        if target == "eflaw":
+            # 연혁 목록에서 동일 ID 000959 를 가진 자연재해대책법 존재
+            return client.Result("eflaw", items=[
+                {"법령명한글": "자연재해대책법", "법령ID": "000959"},
+                {"법령명한글": "풍수해대책법", "법령ID": "000959"}
+            ], total=2)
+        if target == "law":
+            q = params.get("query", "")
+            if "".join(str(q).split()) == "자연재해대책법":
+                return client.Result("law", items=[{"법령명한글": "자연재해대책법"}], total=1)
+        return client.Result(target, items=[], total=0)
+
+    monkeypatch.setattr(client, "call", fake_call)
+    found = history.successor("풍수해대책법")
+    assert found["complete"] is True
+    assert found["candidates"] == ["자연재해대책법"]
+
 
 
 def test_single_call_below_total_is_not_complete(monkeypatch):
@@ -842,7 +876,7 @@ def test_successor_with_cut_body_or_history_is_unknown(monkeypatch):
 
 
 def test_setting_reads_the_user_registry_when_env_is_filtered(monkeypatch):
-    """MCP 클라이언트가 환경을 걸러도 사용자 환경변수(HKCU\Environment)는 읽힌다."""
+    r"""MCP 클라이언트가 환경을 걸러도 사용자 환경변수(HKCU\Environment)는 읽힌다."""
     import sys
     import types
     fake = types.SimpleNamespace(
