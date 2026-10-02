@@ -1199,6 +1199,8 @@ def test_header_first_keys_and_end_tail_11_tools(monkeypatch):
             assert parsed["count"] == {"laws": 1, "articles": 2}
         elif name == "law_tree":
             assert parsed["count"] == {"조례": 1, "rows": 2}
+        elif name in ("law_article", "law_annex_text"):
+            assert parsed["count"] == 1
 
 
 def test_header_first_keys_incomplete_and_errors(monkeypatch):
@@ -1935,6 +1937,151 @@ def test_budget_fitting_preserves_original_counts_and_adds_this_time_counts_law_
 
         # 3. why 문장 일치 검증
         assert ("상한 때문에 이번에는 1~%d 번째만 담았다" % len(body_articles)) in parsed["why"]
+
+
+def test_article_and_annex_text_count_values(monkeypatch):
+    """(과업 2) law_article·law_annex_text 는 결과를 줬으면 count 1, 조문 없음·항 없음이면 0."""
+    # 1. law_article 성공 -> count: 1
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "jo": "제1조", "complete": True,
+        "조번호": "제1조", "조문제목": "목적", "조문내용": "내용", "항": [{"항번호": "①", "항내용": "내용", "호": []}], "호": []
+    })
+    res_art_ok = _call("law_article", {"law": "건축법", "jo": "제1조"})
+    assert res_art_ok["count"] == 1
+    assert res_art_ok["_end"]["count"] == 1
+    assert res_art_ok["complete"] is True
+
+    # 2. law_article 조문 없음 -> count: 0
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "jo": "제999조", "complete": True,
+        "status": "조문 없음", "why": "조문 없음", "조번호": "", "조문내용": "", "항": [], "호": []
+    })
+    res_art_no_jo = _call("law_article", {"law": "건축법", "jo": "제999조"})
+    assert res_art_no_jo["count"] == 0
+    assert res_art_no_jo["_end"]["count"] == 0
+
+    # 3. law_article 해당 항 없음 -> count: 0
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "jo": "제1조", "complete": True,
+        "status": "해당 항 없음", "안내": "이 조에 그 항이 없다", "조번호": "제1조", "조문내용": "", "항": [], "호": []
+    })
+    res_art_no_hang = _call("law_article", {"law": "건축법", "jo": "제1조", "hang": "99"})
+    assert res_art_no_hang["count"] == 0
+    assert res_art_no_hang["_end"]["count"] == 0
+
+    # 4. law_article 실패 -> count: 0
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법", "jo": "제1조", "complete": False, "why": "조회 실패"
+    })
+    res_art_fail = _call("law_article", {"law": "건축법", "jo": "제1조"})
+    assert res_art_fail["count"] == 0
+    assert res_art_fail["_end"]["count"] == 0
+
+    # 5. law_annex_text 성공 -> count: 1
+    monkeypatch.setattr(kit.articles, "get_annex_text", lambda *a, **k: {
+        "law": "건축법 시행규칙", "MST": "123", "annex": "1", "complete": True,
+        "별표번호": "0001", "별표제목": "별표 1", "별표내용": "별표 내용"
+    })
+    res_annex_ok = _call("law_annex_text", {"law": "건축법 시행규칙", "annex": "1"})
+    assert res_annex_ok["count"] == 1
+    assert res_annex_ok["_end"]["count"] == 1
+    assert res_annex_ok["complete"] is True
+
+    # 6. law_annex_text 삭제된 별표(결과 제공) -> count: 1
+    monkeypatch.setattr(kit.articles, "get_annex_text", lambda *a, **k: {
+        "law": "건축법 시행규칙", "MST": "123", "annex": "별표 1", "complete": True,
+        "별표번호": "0001", "별표제목": "별표 1", "별표내용": "삭제 <2020.1.1>", "안내": "삭제된 별표다"
+    })
+    res_annex_del = _call("law_annex_text", {"law": "건축법 시행규칙", "annex": "별표 1"})
+    assert res_annex_del["count"] == 1
+    assert res_annex_del["_end"]["count"] == 1
+
+    # 7. law_annex_text 별표 없음 -> count: 0
+    monkeypatch.setattr(kit.articles, "get_annex_text", lambda *a, **k: {
+        "law": "건축법", "MST": "123", "annex": "1", "complete": True,
+        "status": "별표 없음", "why": "해당 법령에 별표가 없습니다"
+    })
+    res_annex_none = _call("law_annex_text", {"law": "건축법", "annex": "1"})
+    assert res_annex_none["count"] == 0
+    assert res_annex_none["_end"]["count"] == 0
+
+    # 8. law_annex_text 실패 -> count: 0
+    monkeypatch.setattr(kit.articles, "get_annex_text", lambda *a, **k: {
+        "law": "건축법", "annex": "999", "complete": False, "why": "별표를 찾을 수 없습니다"
+    })
+    res_annex_fail = _call("law_annex_text", {"law": "건축법", "annex": "999"})
+    assert res_annex_fail["count"] == 0
+    assert res_annex_fail["_end"]["count"] == 0
+
+
+def test_oc_masking_in_all_tool_outputs(monkeypatch):
+    """(결함 2) 모든 도구 출력 직전에 문자열 안의 OC=<값> 을 OC=*** 로 가린다.
+    - 가짜 키(FAKE_SECRET_OC_KEY_XYZ)가 출력 전체에 절대 없어야 한다.
+    - 중첩 필드, 링크, 리스트 내 항목 모두 OC=*** 로 치환되어야 한다.
+    """
+    fake_key = "FAKE_SECRET_OC_KEY_XYZ"
+    monkeypatch.setenv("LAW_API_OC", fake_key)
+
+    # 1. law_search 모의 응답: 링크들에 OC=<fake_key> 포함
+    monkeypatch.setattr(kit.search, "across", lambda q, **k: {
+        "axes": {
+            "law": {
+                "label": "법령",
+                "items": [
+                    {
+                        "법령명한글": "건축법",
+                        "법령상세링크": "https://www.law.go.kr/DRF/lawService.do?OC=" + fake_key + "&target=law&MST=123",
+                        "기타링크": "/LSW/lsInfoP.do?lsiSeq=123&efYd=20240101&OC=" + fake_key,
+                        "중첩": {
+                            "내부링크": "https://www.law.go.kr/test?a=1&OC=" + fake_key + "&b=2"
+                        }
+                    }
+                ],
+                "total": 1,
+                "complete": True
+            }
+        },
+        "query": q,
+        "complete": True,
+        "why": None,
+        "incomplete": []
+    })
+
+    raw_output = _call_raw_text("law_search", {"query": "건축법"})
+    # 가짜 키 값이 출력 전체에 절대 없어야 함
+    assert fake_key not in raw_output
+    # OC=*** 로 가려졌는지 확인
+    assert "OC=***" in raw_output
+    assert "https://www.law.go.kr/DRF/lawService.do?OC=***&target=law&MST=123" in raw_output
+    assert "/LSW/lsInfoP.do?lsiSeq=123&efYd=20240101&OC=***" in raw_output
+    assert "https://www.law.go.kr/test?a=1&OC=***&b=2" in raw_output
+
+    # 2. law_article 모의 응답: HWP/PDF 파일링크에 OC=<fake_key> 포함
+    monkeypatch.setattr(kit.articles, "get_article", lambda *a, **k: {
+        "law": "건축법",
+        "jo": "제1조",
+        "조번호": "제1조",
+        "조문내용": "내용",
+        "링크": "https://www.law.go.kr/DRF/lawService.do?target=law&OC=" + fake_key,
+        "complete": True
+    })
+
+    raw_art = _call_raw_text("law_article", {"law": "건축법", "jo": "제1조"})
+    assert fake_key not in raw_art
+    assert "target=law&OC=***" in raw_art
+
+    # 3. serialize_response 직접 호출 검증
+    sample_data = {
+        "url": "https://www.law.go.kr/test?OC=" + fake_key,
+        "nested": [{"sub_url": "https://www.law.go.kr/sub?x=1&oc=" + fake_key + "&y=2"}],
+        "already_masked": "https://www.law.go.kr/test?OC=***",
+        "complete": True
+    }
+    serialized = mcp_server.serialize_response(sample_data)
+    assert fake_key not in serialized
+    assert "https://www.law.go.kr/test?OC=***" in serialized
+    assert "https://www.law.go.kr/sub?x=1&OC=***&y=2" in serialized
+
 
 
 

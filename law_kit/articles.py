@@ -6,7 +6,7 @@
 별표는 목록/파일링크뿐 아니라 법 본문 응답에서 별표 본문 텍스트를 꺼내 제공한다.
 """
 import re
-from . import client, laws
+from . import client, laws, history
 from .client import Incomplete, Result
 from .shape import text
 
@@ -196,13 +196,79 @@ def _resolve_law_info(law):
     if len(hits) == 1:
         h = hits[0]
         is_historic = (h.get("찾은방법") == "historic" or h.get("현행") != "현행")
+        target_mst = h.get("MST")
+        target_efyd = text(h.get("시행일자")) or ""
+        base_mst = None
+        base_efyd = None
+
+        if is_historic:
+            law_title = h.get("법령명") or s
+            v = history.versions(law_title)
+            v_complete = v.get("complete") if isinstance(v, dict) else getattr(v, "complete", True)
+            v_ok = v.get("ok") if isinstance(v, dict) else getattr(v, "ok", True)
+            if not v_ok or not v_complete:
+                return {
+                    "mst": None,
+                    "name": h.get("법령명") or s,
+                    "candidates": [],
+                    "error": "연혁 목록을 끝까지 받지 못해 폐지 직전 판을 확정할 수 없다",
+                    "is_historic": True,
+                    "efYd": "",
+                    "기준판_MST": None,
+                    "기준판_시행일자": None,
+                }
+
+            rows = v.partial("versions") if hasattr(v, "partial") else dict.get(v, "versions") or []
+            sorted_rows = sorted(rows, key=lambda r: str(r.get("시행일자") or ""), reverse=True)
+            base_idx = None
+            for idx, r in enumerate(sorted_rows):
+                jg = (r.get("제개정") or "").strip()
+                if jg in ("폐지", "타법폐지"):
+                    continue
+                base_mst = r.get("MST")
+                base_efyd = text(r.get("시행일자")) or ""
+                base_idx = idx
+                break
+
+            if base_mst:
+                target_mst = base_mst
+                target_efyd = base_efyd
+            else:
+                base_mst = target_mst
+                base_efyd = target_efyd
+                base_idx = 0 if sorted_rows else None
+
+            # 기준판 직후 판 판정: sorted_rows(시행일자 내림차순)에서 base_idx - 1 이 시간상 직후 판
+            next_ver = None
+            if base_idx is not None and base_idx > 0:
+                next_ver = sorted_rows[base_idx - 1]
+
+            next_jg = (next_ver.get("제개정") or "").strip() if next_ver else ""
+            if next_jg in ("폐지", "타법폐지"):
+                historic_guide = "폐지된 법이다. 폐지 직전 판의 조문이다"
+                current_cands = None
+            else:
+                historic_guide = "현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라"
+                current_cands = None
+                try:
+                    suc = history.successor(law_title)
+                    c_list = suc.get("candidates") if isinstance(suc, dict) else getattr(suc, "candidates", None)
+                    if c_list:
+                        current_cands = c_list
+                except Exception:
+                    pass
+
         return {
-            "mst": h.get("MST"),
+            "mst": target_mst,
             "name": h.get("법령명"),
             "candidates": [],
             "error": None,
             "is_historic": is_historic,
-            "efYd": text(h.get("시행일자")) or "",
+            "efYd": target_efyd,
+            "기준판_MST": base_mst,
+            "기준판_시행일자": base_efyd,
+            "구법_안내": historic_guide if is_historic else None,
+            "현행_법령명_후보": current_cands if is_historic else None,
         }
 
     # 후보가 여러 개면 고르지 않고 그대로 후보 목록 반환
@@ -213,6 +279,8 @@ def _resolve_law_info(law):
         "error": "일치하는 법령 후보가 여러 개입니다 (%d건). 특정 법령명이나 MST로 다시 조회하세요" % len(hits),
         "is_historic": False,
         "efYd": "",
+        "기준판_MST": None,
+        "기준판_시행일자": None,
     }
 
 
@@ -290,15 +358,26 @@ def get_article(law, jo, hang=None):
     err = info["error"]
     is_historic = info["is_historic"]
     efyd = info["efYd"]
+    base_mst = info.get("기준판_MST") or mst
+    base_efyd = info.get("기준판_시행일자") or efyd
+    historic_guide = info.get("구법_안내") or "폐지된 법이다. 폐지 직전 판의 조문이다"
+    successor_cands = info.get("현행_법령명_후보")
 
     if mst is None:
-        return {
+        fail_dict = {
             "law": law,
             "jo": jo,
             "complete": False,
             "why": err,
             "candidates": candidates
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            if base_mst:
+                fail_dict["기준판_MST"] = base_mst
+            if base_efyd:
+                fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
     # 구법(현행 아님)으로 풀리면 연혁 본문(target=eflaw, service, MST=마지막 판 MST, efYd=그 판 시행일자)으로 조회
     if is_historic:
@@ -315,6 +394,8 @@ def get_article(law, jo, hang=None):
                 "complete": False,
                 "why": "구법이라 현행본에 없다. 연혁본 조회에 실패했다",
                 "구법": True,
+                "기준판_MST": base_mst,
+                "기준판_시행일자": base_efyd,
                 "마지막_시행일자": efyd
             }
         return {
@@ -336,6 +417,8 @@ def get_article(law, jo, hang=None):
                 "complete": False,
                 "why": "구법이라 현행본에 없다. 연혁본 조회에 실패했다",
                 "구법": True,
+                "기준판_MST": base_mst,
+                "기준판_시행일자": base_efyd,
                 "마지막_시행일자": efyd
             }
         return {
@@ -356,6 +439,8 @@ def get_article(law, jo, hang=None):
                 "complete": False,
                 "why": "구법이라 현행본에 없다. 연혁본 조회에 실패했다",
                 "구법": True,
+                "기준판_MST": base_mst,
+                "기준판_시행일자": base_efyd,
                 "마지막_시행일자": efyd
             }
         return {
@@ -370,19 +455,8 @@ def get_article(law, jo, hang=None):
     final_law_name = text(info_dict.get("법령명_한글") or info_dict.get("법령명")) or law_name or law
     enforce_date = text(info_dict.get("시행일자")) or efyd or ""
 
-    jo_root = law_dict.get("조문")
-    if not jo_root or not isinstance(jo_root, dict) or not jo_root.get("조문단위"):
-        if is_historic:
-            return {
-                "law": final_law_name,
-                "MST": mst,
-                "jo": jo,
-                "complete": False,
-                "why": "구법이라 현행본에 없다. 연혁본 조회에 실패했다",
-                "구법": True,
-                "마지막_시행일자": efyd
-            }
-        return {
+    def _make_no_jo_result():
+        res_dict = {
             "law": final_law_name,
             "MST": mst,
             "시행일자": enforce_date,
@@ -397,6 +471,18 @@ def get_article(law, jo, hang=None):
             "항": [],
             "호": []
         }
+        if is_historic:
+            res_dict["구법"] = True
+            res_dict["기준판_MST"] = base_mst
+            res_dict["기준판_시행일자"] = base_efyd
+            guide_msg = "이 판(시행 %s)에 그 조문이 없다" % (base_efyd or enforce_date)
+            res_dict["안내"] = guide_msg
+            res_dict["머리안내"] = guide_msg
+        return res_dict
+
+    jo_root = law_dict.get("조문")
+    if not jo_root or not isinstance(jo_root, dict) or not jo_root.get("조문단위"):
+        return _make_no_jo_result()
 
     unit = jo_root.get("조문단위")
     units = unit if isinstance(unit, list) else [unit]
@@ -424,31 +510,7 @@ def get_article(law, jo, hang=None):
             matched_units.append(u)
 
     if not matched_units:
-        if is_historic:
-            return {
-                "law": final_law_name,
-                "MST": mst,
-                "jo": jo,
-                "complete": False,
-                "why": "구법이라 현행본에 없다. 연혁본 조회에 실패했다",
-                "구법": True,
-                "마지막_시행일자": efyd
-            }
-        return {
-            "law": final_law_name,
-            "MST": mst,
-            "시행일자": enforce_date,
-            "jo": jo,
-            "jo_code": jo_code,
-            "status": "조문 없음",
-            "why": "해당 법령에 해당 조문(%s)이 없습니다" % jo,
-            "complete": True,
-            "조번호": "",
-            "조문제목": "",
-            "조문내용": "",
-            "항": [],
-            "호": []
-        }
+        return _make_no_jo_result()
 
     if len(matched_units) > 1:
         return {
@@ -557,6 +619,12 @@ def get_article(law, jo, hang=None):
             }
             if is_historic:
                 res_dict["구법"] = True
+                res_dict["기준판_MST"] = base_mst
+                res_dict["기준판_시행일자"] = base_efyd
+                res_dict["안내"] = historic_guide
+                res_dict["머리안내"] = historic_guide
+                if successor_cands:
+                    res_dict["현행_법령명_후보"] = successor_cands
                 res_dict["마지막_시행일자"] = efyd
             return res_dict
 
@@ -573,6 +641,12 @@ def get_article(law, jo, hang=None):
     }
     if is_historic:
         res_dict["구법"] = True
+        res_dict["기준판_MST"] = base_mst
+        res_dict["기준판_시행일자"] = base_efyd
+        res_dict["안내"] = historic_guide
+        res_dict["머리안내"] = historic_guide
+        if successor_cands:
+            res_dict["현행_법령명_후보"] = successor_cands
         res_dict["마지막_시행일자"] = efyd
     return res_dict
 
@@ -633,47 +707,82 @@ def get_annex_text(law, annex):
         annex: 별표 번호 (예: "1", "별표 2", "서식 1", "별지 제1호서식")
     """
     target_kind, target_num, target_sub = parse_annex_spec(annex)
-    mst, law_name, candidates, err = _resolve_law_mst(law)
+    info = _resolve_law_info(law)
+    mst = info["mst"]
+    law_name = info["name"]
+    candidates = info["candidates"]
+    err = info["error"]
+    is_historic = info["is_historic"]
+    efyd = info["efYd"]
+    base_mst = info.get("기준판_MST") or mst
+    base_efyd = info.get("기준판_시행일자") or efyd
+    historic_guide = info.get("구법_안내") or "폐지된 법이다. 폐지 직전 판의 조문이다"
+    successor_cands = info.get("현행_법령명_후보")
 
     if mst is None:
-        return {
+        fail_dict = {
             "law": law,
             "annex": annex,
             "complete": False,
             "why": err,
             "candidates": candidates
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            if base_mst:
+                fail_dict["기준판_MST"] = base_mst
+            if base_efyd:
+                fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
-    res = client.call("law", service=True, MST=mst)
+    if is_historic:
+        res = client.call("eflaw", service=True, MST=mst, efYd=efyd)
+    else:
+        res = client.call("law", service=True, MST=mst)
     if not res.ok:
-        return {
+        fail_dict = {
             "law": law_name or law,
             "MST": mst,
             "annex": annex,
             "complete": False,
             "why": res.why_incomplete() or "조회 실패: %s" % (res.error or "사유 미상")
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            fail_dict["기준판_MST"] = base_mst
+            fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
     items = res.partial
     root = items[0] if items else None
     if not isinstance(root, dict):
-        return {
+        fail_dict = {
             "law": law_name or law,
             "MST": mst,
             "annex": annex,
             "complete": False,
             "why": "원 응답을 알아보지 못했다 - 0건인지 알 수 없다"
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            fail_dict["기준판_MST"] = base_mst
+            fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
     law_dict = root.get("법령") if "법령" in root else root
     if not isinstance(law_dict, dict):
-        return {
+        fail_dict = {
             "law": law_name or law,
             "MST": mst,
             "annex": annex,
             "complete": False,
             "why": "원 응답을 알아보지 못했다 - 법령 구조 없음"
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            fail_dict["기준판_MST"] = base_mst
+            fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
     info = law_dict.get("기본정보", {})
     final_law_name = text(info.get("법령명_한글") or info.get("법령명")) or law_name or law
@@ -683,7 +792,7 @@ def get_annex_text(law, annex):
         # 별표가 없음 -> 하위법령 후보 안내
         sub_cands = _find_subordinate_candidates(final_law_name)
         if sub_cands:
-            return {
+            fail_dict = {
                 "law": final_law_name,
                 "MST": mst,
                 "annex": annex,
@@ -691,7 +800,12 @@ def get_annex_text(law, annex):
                 "why": "해당 법령에는 별표가 없습니다. 시행령·시행규칙 등 하위법령에 별표가 규정되어 있을 수 있습니다",
                 "candidates": sub_cands
             }
-        return {
+            if is_historic:
+                fail_dict["구법"] = True
+                fail_dict["기준판_MST"] = base_mst
+                fail_dict["기준판_시행일자"] = base_efyd
+            return fail_dict
+        res_dict = {
             "law": final_law_name,
             "MST": mst,
             "annex": annex,
@@ -699,6 +813,15 @@ def get_annex_text(law, annex):
             "why": "해당 법령에 별표가 없습니다",
             "complete": True
         }
+        if is_historic:
+            res_dict["구법"] = True
+            res_dict["기준판_MST"] = base_mst
+            res_dict["기준판_시행일자"] = base_efyd
+            res_dict["안내"] = historic_guide
+            res_dict["머리안내"] = historic_guide
+            if successor_cands:
+                res_dict["현행_법령명_후보"] = successor_cands
+        return res_dict
 
     units = annex_root.get("별표단위")
     unit_list = units if isinstance(units, list) else [units]
@@ -739,7 +862,7 @@ def get_annex_text(law, annex):
 
     if not matched_units:
         # 없으면 complete:false + 그 법의 별표/서식 목록 요약
-        return {
+        fail_dict = {
             "law": final_law_name,
             "MST": mst,
             "annex": annex,
@@ -747,6 +870,11 @@ def get_annex_text(law, annex):
             "why": "해당 법령에서 %s %s을(를) 찾을 수 없습니다" % (target_kind, annex),
             "목록": summary_list
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            fail_dict["기준판_MST"] = base_mst
+            fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
     matched_unit = matched_units[0]
 
@@ -768,7 +896,7 @@ def get_annex_text(law, annex):
 
     # 내용이 "삭제 <날짜>" 뿐인 별표는 complete:true 로 주되 머리 안내에 "삭제된 별표다" 를 넣는다
     if is_deleted:
-        return {
+        del_dict = {
             "law": final_law_name,
             "MST": mst,
             "annex": annex,
@@ -784,11 +912,16 @@ def get_annex_text(law, annex):
             "파일링크": {"hwp": hwp_link, "pdf": pdf_link},
             "complete": True
         }
+        if is_historic:
+            del_dict["구법"] = True
+            del_dict["기준판_MST"] = base_mst
+            del_dict["기준판_시행일자"] = base_efyd
+        return del_dict
 
     # 본문 텍스트·파일 링크가 둘 다 비면 why 에 "파일 링크도 없다"
     if not text_content:
         if not hwp_link and not pdf_link:
-            return {
+            fail_dict = {
                 "law": final_law_name,
                 "MST": mst,
                 "annex": annex,
@@ -802,7 +935,12 @@ def get_annex_text(law, annex):
                 "pdf": "",
                 "파일링크": {"hwp": "", "pdf": ""}
             }
-        return {
+            if is_historic:
+                fail_dict["구법"] = True
+                fail_dict["기준판_MST"] = base_mst
+                fail_dict["기준판_시행일자"] = base_efyd
+            return fail_dict
+        fail_dict = {
             "law": final_law_name,
             "MST": mst,
             "annex": annex,
@@ -816,8 +954,13 @@ def get_annex_text(law, annex):
             "pdf": pdf_link,
             "파일링크": {"hwp": hwp_link, "pdf": pdf_link}
         }
+        if is_historic:
+            fail_dict["구법"] = True
+            fail_dict["기준판_MST"] = base_mst
+            fail_dict["기준판_시행일자"] = base_efyd
+        return fail_dict
 
-    return {
+    res_dict = {
         "law": final_law_name,
         "MST": mst,
         "annex": annex,
@@ -831,3 +974,12 @@ def get_annex_text(law, annex):
         "파일링크": {"hwp": hwp_link, "pdf": pdf_link},
         "complete": True
     }
+    if is_historic:
+        res_dict["구법"] = True
+        res_dict["기준판_MST"] = base_mst
+        res_dict["기준판_시행일자"] = base_efyd
+        res_dict["안내"] = historic_guide
+        res_dict["머리안내"] = historic_guide
+        if successor_cands:
+            res_dict["현행_법령명_후보"] = successor_cands
+    return res_dict
