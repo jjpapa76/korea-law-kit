@@ -17,7 +17,7 @@ korea-law-mcp = "law_kit.mcp_server:main"
 packages = ["law_kit"]
 
 [tool.setuptools.package-data]
-law_kit = ["law_api_catalog.json"]
+law_kit = ["law_api_catalog.json", "aliases.json"]
 
 [tool.setuptools.exclude-package-data]
 law_kit = [".cache", ".cache/*", ".cache/**/*"]
