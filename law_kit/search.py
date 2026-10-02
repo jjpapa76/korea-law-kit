@@ -96,6 +96,19 @@ def extract_keywords(query):
     return words
 
 
+#: 낱말 3개 이상 검색 0건 why 문구
+ZERO_HIT_3WORDS_WHY = "모든 낱말이 들어간 결과가 0건이다. 없다고 단정하지 마라 - 낱말을 줄여 다시 물어라"
+#: 본문검색 0건인데 낱말별 법령명 검색으로 채운 경우 why 문구
+LAW_BODY_ZERO_NAME_FALLBACK_WHY = "본문검색은 0건이고, 낱말이 이름에 들어간 법을 대신 보였다 - 원래 검색어 전체를 만족하는지는 확인하지 않았다"
+
+
+def get_query_base_words(query):
+    """질의어에서 조사/단독단어를 제외한 2글자 이상 핵심 낱말 목록을 구한다."""
+    tokens = clean_query(query).split()
+    raw_words = [t for t in tokens if t not in _JOSA_STANDALONE and len(t) >= 2]
+    return raw_words if raw_words else [w for w in tokens if len(w) >= 2]
+
+
 def get_stems(word):
     """낱말과 앞 2~3글자 어간 목록을 돌려준다."""
     w = str(word).strip()
@@ -238,6 +251,8 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
         req_display = 20
     if req_display <= 0:
         req_display = 20
+
+    word_count = len(get_query_base_words(query))
 
     is_law_body = (target == "law" and (search_mode in (2, "2") or params.get("search") in (2, "2")))
     if is_law_body:
@@ -415,44 +430,86 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
         else:
             next_offset = None
 
-        # 라. total>100 이거나, total 을 모르는데 100건을 꽉 채워 받았으면 항상 complete:false + why "총 N건(또는 알 수 없음) 중 앞 100건 안에서만 정렬했다". total 은 법제처 원래 값.
-        is_unknown_total = (result.total is None or str(result.total).strip() == "" or expected == 0)
-        is_cap_100 = (expected > 100) or (is_unknown_total and sorted_len >= 100)
+        body_keys = set()
+        for r in rows:
+            raw = r.get("raw") or {}
+            lid = str(raw.get("법령ID") or "").strip()
+            mst = str(raw.get("법령일련번호") or raw.get("MST") or "").strip()
+            t = str(r.get("제목") or "").strip()
+            if lid:
+                body_keys.add(("id", lid))
+            if mst:
+                body_keys.add(("mst", mst))
+            if t:
+                body_keys.add(("title", t))
 
-        if is_cap_100:
+        def _is_from_body(item):
+            raw = item.get("raw") or {}
+            lid = str(raw.get("법령ID") or "").strip()
+            mst = str(raw.get("법령일련번호") or raw.get("MST") or "").strip()
+            t = str(item.get("제목") or "").strip()
+            return (("id", lid) in body_keys) or (("mst", mst) in body_keys) or (("title", t) in body_keys)
+
+        has_body_results_in_page = any(_is_from_body(item) for item in paged_rows)
+        body_has_results = (len(rows) > 0 or expected > 0)
+        only_word_results = (paged_count > 0 and not has_body_results_in_page)
+
+        if only_word_results:
             complete = False
-            total_label = ("%d건" % expected) if expected > 0 else "알 수 없음"
-            why = "총 %s 중 앞 100건 안에서만 정렬했다" % total_label
+            why = LAW_BODY_ZERO_NAME_FALLBACK_WHY
             note = why
-        elif expected > 0:
-            if expected > (offset_val + paged_count):
+        elif not body_has_results and paged_count == 0:
+            if word_count >= 3:
                 complete = False
-                note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
-                        "전수가 필요하면 all_pages() 를 쓰라" % (expected, offset_val + paged_count, req_display))
-                why = note
-            elif not result.complete:
-                complete = False
-                why = result.why_incomplete()
+                why = ZERO_HIT_3WORDS_WHY
                 note = why
             else:
                 complete = True
                 note = ""
                 why = ""
         else:
-            # total을 모르는데 100건 미만으로 받은 경우 (sorted_len < 100)
-            if (offset_val + paged_count) < sorted_len:
+            # 라. total>100 이거나, total 을 모르는데 100건을 꽉 채워 받았으면 항상 complete:false + why "총 N건(또는 알 수 없음) 중 앞 100건 안에서만 정렬했다". total 은 법제처 원래 값.
+            is_unknown_total = (result.total is None or str(result.total).strip() == "" or expected == 0)
+            is_cap_100 = (expected > 100) or (is_unknown_total and sorted_len >= 100)
+
+            if is_cap_100:
                 complete = False
-                note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
-                        "전수가 필요하면 all_pages() 를 쓰라" % (sorted_len, offset_val + paged_count, req_display))
-                why = note
-            elif not result.complete:
-                complete = False
-                why = result.why_incomplete()
+                total_label = ("%d건" % expected) if expected > 0 else "알 수 없음"
+                why = "총 %s 중 앞 100건 안에서만 정렬했다" % total_label
                 note = why
+            elif expected > 0:
+                if expected > (offset_val + paged_count):
+                    complete = False
+                    note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
+                            "전수가 필요하면 all_pages() 를 쓰라" % (expected, offset_val + paged_count, req_display))
+                    why = note
+                elif not result.complete:
+                    complete = False
+                    why = result.why_incomplete()
+                    note = why
+                else:
+                    complete = True
+                    note = ""
+                    why = ""
             else:
-                complete = True
-                note = ""
-                why = ""
+                # total을 모르는데 100건 미만으로 받은 경우 (sorted_len < 100)
+                if (offset_val + paged_count) < sorted_len:
+                    complete = False
+                    note = ("총 %d건 중 앞 %d건만 봤다 (display=%s). "
+                            "전수가 필요하면 all_pages() 를 쓰라" % (sorted_len, offset_val + paged_count, req_display))
+                    why = note
+                elif not result.complete:
+                    complete = False
+                    why = result.why_incomplete()
+                    note = why
+                elif paged_count == 0 and word_count >= 3:
+                    complete = False
+                    why = ZERO_HIT_3WORDS_WHY
+                    note = why
+                else:
+                    complete = True
+                    note = ""
+                    why = ""
 
         ans_data = {
             "target": target,
@@ -466,6 +523,8 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
             "cached": result.cached,
             "정렬": "낱말 법령명 일치 → 본문검색 앞 100건(법제처는 관련도 정렬 미지원)",
         }
+        if not complete and why == ZERO_HIT_3WORDS_WHY:
+            ans_data["안내"] = why
         if next_offset is not None:
             ans_data["next_offset"] = next_offset
         return Answer(ans_data)
@@ -564,6 +623,10 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
             complete = False
             why = first_result.why_incomplete()
             note = why
+        elif paged_count == 0 and word_count >= 3:
+            complete = False
+            why = ZERO_HIT_3WORDS_WHY
+            note = why
         else:
             complete = True
             note = ""
@@ -580,6 +643,8 @@ def one(target, query, display=20, search_mode=None, ttl=client.CACHE_TTL,
         "why": why,
         "cached": all_cached,
     }
+    if not complete and why == ZERO_HIT_3WORDS_WHY:
+        ans_data["안내"] = why
     if next_offset is not None:
         ans_data["next_offset"] = next_offset
     return Answer(ans_data)
@@ -616,9 +681,7 @@ def across(query, axes=AXES, display=20, name_first=True, body_fallback=True,
         offset_val = 0
 
     out = {}
-    tokens = clean_query(query).split()
-    raw_words = [t for t in tokens if t not in _JOSA_STANDALONE and len(t) >= 2]
-    base_words = raw_words if raw_words else [w for w in tokens if len(w) >= 2]
+    base_words = get_query_base_words(query)
     word_count = len(base_words)
 
     fetch = (lambda t, m=None: all_pages(t, query, search_mode=m, **extra)) if exhaustive else (
@@ -665,7 +728,7 @@ def across(query, axes=AXES, display=20, name_first=True, body_fallback=True,
                 dict.__setitem__(found, "검색어_정리", reduced_query)
             else:
                 dict.__setitem__(found, "complete", False)
-                why_msg = "모든 낱말이 들어간 결과가 0건이다. 없다고 단정하지 마라 - 낱말을 줄여 다시 물어라"
+                why_msg = ZERO_HIT_3WORDS_WHY
                 dict.__setitem__(found, "why", why_msg)
                 dict.__setitem__(found, "note", why_msg)
                 dict.__setitem__(found, "검색어_정리", reduced_query)
