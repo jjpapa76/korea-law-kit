@@ -2083,6 +2083,98 @@ def test_oc_masking_in_all_tool_outputs(monkeypatch):
     assert "https://www.law.go.kr/sub?x=1&OC=***&y=2" in serialized
 
 
+# ---------------------------------------------------------------- 21. law_tree complete 판정 및 근로기준법 회귀 시험
+def test_law_tree_incomplete_when_law_not_found(monkeypatch):
+    """법을 찾지 못했을 때(ok=False, complete=False) law_tree 는 complete: False + why 여야 한다.
+    (근로기준법·행정절차법 하위법령 0건인데 complete:true 로 거짓 단정하던 결함 방어)
+    """
+    not_found_ans = Answer({
+        "law": "근로기준법",
+        "ok": False,
+        "complete": False,
+        "error": "법을 찾지 못했다",
+        "note": "'근로기준법' 라는 이름의 법을 찾지 못했다. laws.find() 로 후보를 확인하라",
+        "rows": [],
+        "groups": {},
+        "resolved": None
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: not_found_ans)
+
+    out = mcp_server.dispatch_tool("law_tree", {"law": "근로기준법"})
+    assert out["complete"] is False
+    assert "찾지 못했다" in out["why"]
+    assert out["total"] == 0
+    assert out["법령체계"] == {"시행령": [], "시행규칙": [], "위임행정규칙": []}
+
+
+def test_law_tree_incomplete_when_service_call_fails(monkeypatch):
+    """법은 찾았으나 체계 조회(lsDelegated)가 통신 장애 등으로 실패했을 때 complete: False + why."""
+    failed_ans = Answer({
+        "law": "001872",
+        "ok": False,
+        "complete": False,
+        "error": "서버 장애 500",
+        "note": "조회 실패: 서버 장애 500",
+        "rows": [],
+        "groups": {},
+        "resolved": {"법령명": "근로기준법", "ID": "001872"}
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: failed_ans)
+
+    out = mcp_server.dispatch_tool("law_tree", {"law": "근로기준법"})
+    assert out["complete"] is False
+    assert "서버 장애 500" in out["why"] or "조회 실패" in out["why"]
+
+
+def test_law_tree_complete_true_only_when_genuinely_empty(monkeypatch):
+    """법을 정상적으로 찾았고 체계 조회가 성공했으며 실제로 하위법령이 0건일 때만 complete: True."""
+    empty_ans = Answer({
+        "law": "어떤법",
+        "ok": True,
+        "complete": True,
+        "error": "",
+        "note": "",
+        "rows": [],
+        "groups": {},
+        "resolved": {"법령명": "어떤법", "ID": "999999"}
+    })
+    monkeypatch.setattr(kit.tree, "delegated", lambda *a, **k: empty_ans)
+
+    out = mcp_server.dispatch_tool("law_tree", {"law": "어떤법"})
+    assert out["complete"] is True
+    assert out["why"] == ""
+    assert out["total"] == 0
+
+
+def test_labor_standards_act_regression_with_sanitized_fixture(monkeypatch):
+    """원인 재현 fixture(키 지우기)를 이용한 근로기준법 검색 및 조회 회귀 시험."""
+    fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures")
+    fixture_path = os.path.join(fixtures_dir, "labor_standards_act_search.json")
+    with open(fixture_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    # fixture 본문에 실제 인증키가 없음을 단언 (키 지우기 검증)
+    content_str = json.dumps(payload, ensure_ascii=False)
+    actual_oc = kit.client.oc()
+    if actual_oc and actual_oc != "test":
+        assert actual_oc not in content_str
+
+    total, items = kit.client.unwrap(payload)
+    assert total == "3" or total == 3
+    assert len(items) == 3
+
+    # client.call mock 하여 laws.find 검증
+    fake_res = Result("law", items=items, total=3, complete=True)
+    monkeypatch.setattr(kit.client, "call", lambda *a, **k: fake_res)
+
+    hits = kit.laws.find("근로기준법")
+    assert len(hits) >= 1
+    assert hits[0]["법령명"] == "근로기준법"
+    assert hits[0]["찾은방법"] == "exact"
+    assert hits[0]["ID"] == "001872"
+
+
+
 
 
 
