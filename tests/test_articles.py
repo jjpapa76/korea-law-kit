@@ -595,25 +595,39 @@ def test_fixture_building_rule_annex_and_form(monkeypatch):
 
 def test_fixture_urban_plan_act_art1_historic(monkeypatch):
     """실제 도시계획법(구법) 응답:
-    - 마지막 판(폐지판본)에서 제1조가 없으면 complete:false + 구법:true + 사유 안내
-    - 연혁본 조문이 있는 판본에서는 실제 목적 조문 추출 + 구법:true
+    - 본문을 받았으나 그 판(57195)에 조문이 없으면 현행법과 같이 status '조문 없음' + complete:true + 안내
+    - 본문 자체를 못 받았을 때만 complete:false + 연혁본 조회 실패 안내
+    - 연혁본 조문이 있는 판본(8776)에서는 실제 목적 조문 추출 + 구법:true
     """
     urban_last_payload = _load_fixture("urban_plan_act_art1.json")
     urban_hist_payload = _load_fixture("urban_plan_act_art1_hist.json")
 
-    # Case A: 마지막 판(57195) - 조문 없음
+    # Case A: 마지막 판(57195) 본문은 정상 수신했으나 조문이 없는 판본 -> complete: true, 조문 없음
     monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
         {"법령명": "도시계획법", "MST": "57195", "현행": "연혁", "찾은방법": "historic", "시행일자": "20030101"}
     ])
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True,
+        "versions": [{"법령명": "도시계획법", "MST": "57195", "시행일자": "20030101", "제개정": "타법폐지", "상태": "연혁"}]
+    }))
     monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
         "eflaw", ok=True, complete=True, items=urban_last_payload
     ))
 
     res_last = articles.get_article("도시계획법", "제1조")
-    assert res_last["complete"] is False
+    assert res_last["complete"] is True
+    assert res_last["status"] == "조문 없음"
     assert res_last.get("구법") is True
-    assert res_last.get("마지막_시행일자") == "20030101"
-    assert "구법이라 현행본에 없다. 연혁본 조회에 실패했다" in res_last["why"]
+    assert res_last.get("안내") == "이 판(시행 20030101)에 그 조문이 없다"
+
+    # Case A-2: 본문 자체를 못 받았을 때(ok=False) -> complete: false
+    monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
+        "eflaw", ok=False, complete=False, error="조회 실패"
+    ))
+    res_fail = articles.get_article("도시계획법", "제1조")
+    assert res_fail["complete"] is False
+    assert res_fail.get("구법") is True
+    assert "구법이라 현행본에 없다. 연혁본 조회에 실패했다" in res_fail["why"]
 
     # Case B: 연혁본 조문이 있는 판(8776)
     monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
@@ -689,3 +703,146 @@ def test_hang_with_ho_or_zero_rejected():
     for bad in ["제2항제1호", "2항1호", "0", "제0항"]:
         with pytest.raises(ValueError):
             articles.get_article("건축법", "제11조", hang=bad)
+
+
+def test_historic_law_skips_abolished_version_and_picks_last_content_version(monkeypatch):
+    """(과업 1 & 결함 1, 2)
+    1. 도시계획법 제1조 회귀: 폐지 판을 건너뛰고 직전 본문 판(8776)을 골라 제1조 정상 추출
+    2. 기준판에 없는 조(도시계획법 제999조): 본문은 받았으나 조가 없으므로 '조문 없음' (complete:true + 안내)
+    3. 불완전 연혁: 연혁 목록 조회가 불완전(complete:false)하면 기준판 미단정 및 complete:false + 안내
+    4. 본문 자체 조회 실패: eflaw 호출 실패 시에만 complete:false + 연혁본 조회 실패 안내
+    """
+    urban_hist_payload = _load_fixture("urban_plan_act_art1_hist.json")
+
+    fake_versions = [
+        {"법령명": "도시계획법", "MST": "57195", "시행일자": "20030101", "제개정": "타법폐지", "상태": "연혁"},
+        {"법령명": "도시계획법", "MST": "8776", "시행일자": "20000701", "제개정": "전부개정", "상태": "연혁"},
+        {"법령명": "도시계획법", "MST": "8775", "시행일자": "19990809", "제개정": "일부개정", "상태": "연혁"},
+    ]
+    monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
+        {"법령명": "도시계획법", "MST": "57195", "현행": "연혁", "찾은방법": "historic", "시행일자": "20030101"}
+    ])
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": fake_versions
+    }))
+
+    def mock_call(target, service=False, **params):
+        if target == "eflaw" and service and params.get("MST") == "8776":
+            return Result("eflaw", ok=True, complete=True, items=urban_hist_payload)
+        return Result(target, ok=False, complete=False, error="조회 실패")
+
+    monkeypatch.setattr(kit.client, "call", mock_call)
+
+    # 1. 도시계획법 제1조 정상 추출 (회귀)
+    res = articles.get_article("도시계획법", "제1조")
+    assert res["complete"] is True
+    assert res.get("구법") is True
+    assert res.get("기준판_MST") == "8776"
+    assert res.get("기준판_시행일자") == "20000701"
+    assert res.get("안내") == "폐지된 법이다. 폐지 직전 판의 조문이다"
+    assert res.get("머리안내") == "폐지된 법이다. 폐지 직전 판의 조문이다"
+    assert res["조번호"] == "제1조"
+    assert res["조문제목"] == "목적"
+    assert "도시계획의 수립 및 집행에 관하여" in res["조문내용"]
+
+    # 2. 기준판에 없는 조(예: 도시계획법 제999조) -> 조문 없음 (complete: true + 안내)
+    res_999 = articles.get_article("도시계획법", "제999조")
+    assert res_999["complete"] is True
+    assert res_999["status"] == "조문 없음"
+    assert res_999.get("구법") is True
+    assert res_999.get("기준판_MST") == "8776"
+    assert res_999.get("기준판_시행일자") == "20000701"
+    assert res_999.get("안내") == "이 판(시행 20000701)에 그 조문이 없다"
+    assert res_999.get("머리안내") == "이 판(시행 20000701)에 그 조문이 없다"
+
+    # 3. 불완전 연혁 -> complete: false + why "연혁 목록을 끝까지 받지 못해 폐지 직전 판을 확정할 수 없다"
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": False, "versions": fake_versions,
+        "note": "페이지 상한에 걸렸다"
+    }))
+    res_incomplete = articles.get_article("도시계획법", "제1조")
+    assert res_incomplete["complete"] is False
+    assert res_incomplete.get("구법") is True
+    assert res_incomplete["why"] == "연혁 목록을 끝까지 받지 못해 폐지 직전 판을 확정할 수 없다"
+
+    res_annex_incomplete = articles.get_annex_text("도시계획법", "1")
+    assert res_annex_incomplete["complete"] is False
+    assert res_annex_incomplete.get("구법") is True
+    assert res_annex_incomplete["why"] == "연혁 목록을 끝까지 받지 못해 폐지 직전 판을 확정할 수 없다"
+
+    # 4. 본문 자체 조회 실패 시에만 complete: false + 연혁본 조회 실패 안내
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": fake_versions
+    }))
+    monkeypatch.setattr(kit.client, "call", lambda *a, **k: Result(
+        "eflaw", ok=False, complete=False, error="네트워크 단절"
+    ))
+    res_fail = articles.get_article("도시계획법", "제1조")
+    assert res_fail["complete"] is False
+    assert res_fail.get("구법") is True
+    assert res_fail.get("기준판_MST") == "8776"
+    assert "구법이라 현행본에 없다. 연혁본 조회에 실패했다" in res_fail["why"]
+
+
+def test_historic_law_guide_types_abolished_vs_renamed(monkeypatch):
+    """옛 이름 안내 문구 2종:
+    1) 폐지: 기준판 직후 판의 제개정구분이 폐지·타법폐지 -> '폐지된 법이다. 폐지 직전 판의 조문이다'
+    2) 제명변경: 기준판 직후 판의 제개정구분이 그 밖(제명변경 등) 또는 없음 ->
+       '현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라'
+       및 '현행_법령명_후보' 포함.
+    """
+    urban_hist_payload = _load_fixture("urban_plan_act_art1_hist.json")
+
+    # 1. 폐지 케이스 (직후 판 제개정이 타법폐지)
+    fake_versions_abolished = [
+        {"법령명": "구법테스트1", "MST": "9999", "시행일자": "20050101", "제개정": "타법폐지", "상태": "연혁"},
+        {"법령명": "구법테스트1", "MST": "8776", "시행일자": "20000701", "제개정": "일부개정", "상태": "연혁"},
+    ]
+    monkeypatch.setattr(kit.laws, "find", lambda name, **k: [
+        {"법령명": name, "MST": "9999", "현행": "연혁", "찾은방법": "historic", "시행일자": "20050101"}
+    ])
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": fake_versions_abolished
+    }))
+    monkeypatch.setattr(kit.client, "call", lambda target, service=False, **p: Result(
+        "eflaw", ok=True, complete=True, items=urban_hist_payload
+    ))
+
+    res_abolished = articles.get_article("구법테스트1", "제1조")
+    assert res_abolished["complete"] is True
+    assert res_abolished.get("구법") is True
+    assert res_abolished.get("안내") == "폐지된 법이다. 폐지 직전 판의 조문이다"
+    assert res_abolished.get("머리안내") == "폐지된 법이다. 폐지 직전 판의 조문이다"
+    assert "현행_법령명_후보" not in res_abolished
+
+    # 2. 제명변경 케이스 A: 직후 판의 제개정이 '제명변경'
+    fake_versions_renamed = [
+        {"법령명": "구법테스트2", "MST": "8888", "시행일자": "20040101", "제개정": "제명변경", "상태": "연혁"},
+        {"법령명": "구법테스트2", "MST": "8776", "시행일자": "20000701", "제개정": "전부개정", "상태": "연혁"},
+    ]
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": fake_versions_renamed
+    }))
+    monkeypatch.setattr(kit.history, "successor", lambda name: {
+        "name": name, "status": "구법", "candidates": ["신법후보A", "신법후보B"]
+    })
+
+    res_renamed = articles.get_article("구법테스트2", "제1조")
+    assert res_renamed["complete"] is True
+    assert res_renamed.get("구법") is True
+    assert res_renamed.get("안내") == "현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라"
+    assert res_renamed.get("머리안내") == "현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라"
+    assert res_renamed.get("현행_법령명_후보") == ["신법후보A", "신법후보B"]
+
+    # 3. 제명변경 케이스 B: 기준판이 최신판이어서 직후 판이 없는 경우 (타법개정 등으로 끝나고 폐지판 없음)
+    fake_versions_no_next = [
+        {"법령명": "구법테스트3", "MST": "8776", "시행일자": "20000701", "제개정": "타법개정", "상태": "연혁"},
+    ]
+    monkeypatch.setattr(kit.history, "versions", lambda name, **k: kit.shape.Answer({
+        "name": name, "ok": True, "complete": True, "versions": fake_versions_no_next
+    }))
+    res_no_next = articles.get_article("구법테스트3", "제1조")
+    assert res_no_next["complete"] is True
+    assert res_no_next.get("구법") is True
+    assert res_no_next.get("안내") == "현행이 아닌 옛 법령명이다. 그 이름으로 시행된 마지막 판의 조문이다 - 현행 조문은 현행 법령명으로 다시 물어라"
+

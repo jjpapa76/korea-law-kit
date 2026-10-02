@@ -21,11 +21,22 @@ JSON-RPC 2.0 프로토콜을 구현해 국가법령 도구 11종을 제공한다
 import io
 import json
 import os
+import re
 import sys
 import traceback
 
 import law_kit as kit
 from law_kit.client import Incomplete, Result, is_demo_key
+
+#: 법제처 응답 링크의 OC=<인증키> 마스킹용 정규식
+_OC_MASK_RE = re.compile(r"(?i)\bOC=[^&\"'\s\\]+")
+
+
+def _mask_oc(text):
+    """문자열 안의 OC=<값> 을 OC=*** 로 가린다 (캐시·내부 호출 영향 없이 MCP 출력 직전에만)."""
+    if not text or not isinstance(text, str):
+        return text
+    return _OC_MASK_RE.sub("OC=***", text)
 from law_kit.shape import Answer, PAYLOAD_KEYS
 
 #: MCP 기본 프로토콜 버전
@@ -342,6 +353,8 @@ def _walk(val, gaps, where):
                 for k in val.keys()}
     if isinstance(val, (list, tuple)):
         return [_walk(x, gaps, where) for x in val]
+    if isinstance(val, str):
+        return _mask_oc(val)
     return val
 
 
@@ -351,6 +364,27 @@ def _compute_count(data):
         return len(data)
     if not isinstance(data, dict):
         return 0
+
+    # 0. 조문·별표 단건 조회 도구 특화 (law_article, law_annex_text)
+    is_article = (
+        ("조번호" in data and ("조문내용" in data or "조문제목" in data))
+        or data.get("status") in ("조문 없음", "해당 항 없음")
+        or ("jo" in data and ("law" in data or "MST" in data) and "articles" not in data)
+    )
+    if is_article:
+        if data.get("status") in ("조문 없음", "해당 항 없음"):
+            return 0
+        if not data.get("complete", True):
+            return 0
+        return 1
+
+    is_annex_text = ("annex" in data and ("law" in data or "MST" in data))
+    if is_annex_text:
+        if data.get("status") == "별표 없음":
+            return 0
+        if not data.get("complete", True):
+            return 0
+        return 1
 
     # 1. 특수 구조: axes (law_search)
     if "axes" in data and isinstance(data["axes"], dict):
@@ -956,7 +990,7 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
 
     # 상한 이내이면 바로 반환
     if len(text_out) <= max_chars and len(text_out_bytes) <= max_bytes:
-        return text_out
+        return _mask_oc(text_out)
 
     # --- 예산에 맞춰 담기 (상한 초과 시) ---
     is_complete = False
@@ -1204,6 +1238,9 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
             keep = step
         text_out = cut_text
 
+    # 모든 도구 출력 직전에 문자열 안의 OC=<값> 을 OC=*** 로 가린다 (모든 도구·모든 필드·중첩 포함)
+    text_out = _mask_oc(text_out)
+
     # 3,800바이트 기준 최종 안내문 정합성 동기화
     final_bytes_len = len(text_out.encode("utf-8"))
     if final_bytes_len > READ_GUIDE_THRESHOLD_BYTES and '"읽기안내"' not in text_out[:200]:
@@ -1226,7 +1263,7 @@ def serialize_response(val, is_incomplete_exc=False, exc_obj=None, client_name=N
         except Exception:
             pass
 
-    return text_out
+    return _mask_oc(text_out)
 
 
 def _make_call_spec(entry):
@@ -1749,7 +1786,7 @@ def handle_message(req, writer):
         except Exception as exc:
             # 네트워크 오류 등 기타 예외는 tools/call 결과의 isError: true 에 원인을 넣는다
             # JSON-RPC 오류로 삼키지 않는다
-            err_msg = "도구 실행 실패: %s: %s" % (type(exc).__name__, exc)
+            err_msg = _mask_oc("도구 실행 실패: %s: %s" % (type(exc).__name__, exc))
             _write_msg(writer, {
                 "jsonrpc": "2.0",
                 "id": msg_id,
