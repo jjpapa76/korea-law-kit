@@ -244,7 +244,15 @@ def _resolve_law_info(law):
                 next_ver = sorted_rows[base_idx - 1]
 
             next_jg = (next_ver.get("제개정") or "").strip() if next_ver else ""
+            is_repealed = False
             if next_jg in ("폐지", "타법폐지"):
+                is_repealed = True
+            elif sorted_rows and (sorted_rows[0].get("제개정") or "").strip() in ("폐지", "타법폐지"):
+                is_repealed = True
+            elif (h.get("제개정") or h.get("제개정구분") or h.get("제개정구분명") or "").strip() in ("폐지", "타법폐지"):
+                is_repealed = True
+
+            if is_repealed:
                 historic_guide = "폐지된 법이다. 폐지 직전 판의 조문이다"
                 current_cands = None
             else:
@@ -451,9 +459,9 @@ def get_article(law, jo, hang=None):
             "why": "원 응답을 알아보지 못했다 - 법령 구조 없음"
         }
 
-    info_dict = law_dict.get("기본정보", {})
-    final_law_name = text(info_dict.get("법령명_한글") or info_dict.get("법령명")) or law_name or law
-    enforce_date = text(info_dict.get("시행일자")) or efyd or ""
+    info_dict = law_dict.get("기본정보", {}) if isinstance(law_dict.get("기본정보"), dict) else {}
+    final_law_name = text(info_dict.get("법령명_한글") or info_dict.get("법령명") or law_dict.get("법령명_한글") or law_dict.get("법령명")) or law_name or law
+    enforce_date = text(info_dict.get("시행일자") or law_dict.get("시행일자")) or efyd or ""
 
     def _make_no_jo_result():
         res_dict = {
@@ -481,11 +489,122 @@ def get_article(law, jo, hang=None):
         return res_dict
 
     jo_root = law_dict.get("조문")
-    if not jo_root or not isinstance(jo_root, dict) or not jo_root.get("조문단위"):
-        return _make_no_jo_result()
+    units = []
+    if jo_root and isinstance(jo_root, dict) and jo_root.get("조문단위"):
+        raw_units = jo_root.get("조문단위")
+        units = raw_units if isinstance(raw_units, list) else [raw_units]
 
-    unit = jo_root.get("조문단위")
-    units = unit if isinstance(unit, list) else [unit]
+    if not units:
+        # 고른 판의 본문에 조문이 하나도 없으면(폐지 판) 절대 "조문 없음" 으로 내지 말고, 그 앞 판을 찾는다.
+        # 앞 판을 못 찾으면 complete:false + why "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다".
+        law_query_name = final_law_name or law_name or str(law)
+        v = history.versions(law_query_name)
+        rows = v.partial("versions") if hasattr(v, "partial") else dict.get(v, "versions") or []
+        sorted_rows = sorted(rows, key=lambda r: str(r.get("시행일자") or ""), reverse=True)
+
+        cur_date = str(enforce_date or "")
+        cur_mst = str(mst or "")
+
+        prev_cand = None
+        cur_idx = None
+        for i, r in enumerate(sorted_rows):
+            if str(r.get("MST") or "") == cur_mst or (cur_date and str(r.get("시행일자") or "") == cur_date):
+                cur_idx = i
+                break
+
+        if cur_idx is not None:
+            # 현재 판 이후(시간상 직전 판)에서 제개정이 폐지/타법폐지가 아닌 판 우선 탐색
+            for r in sorted_rows[cur_idx + 1:]:
+                jg = (r.get("제개정") or "").strip()
+                if jg not in ("폐지", "타법폐지"):
+                    prev_cand = r
+                    break
+            if not prev_cand and cur_idx + 1 < len(sorted_rows):
+                prev_cand = sorted_rows[cur_idx + 1]
+        else:
+            for r in sorted_rows:
+                r_date = str(r.get("시행일자") or "")
+                if cur_date and r_date >= cur_date:
+                    continue
+                jg = (r.get("제개정") or "").strip()
+                if jg not in ("폐지", "타법폐지"):
+                    prev_cand = r
+                    break
+            if not prev_cand:
+                for r in sorted_rows:
+                    r_date = str(r.get("시행일자") or "")
+                    if cur_date and r_date < cur_date:
+                        prev_cand = r
+                        break
+
+        if not prev_cand:
+            return {
+                "law": final_law_name or law_name or str(law),
+                "MST": mst,
+                "jo": jo,
+                "complete": False,
+                "why": "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다",
+                "구법": True,
+                "기준판_MST": base_mst,
+                "기준판_시행일자": base_efyd,
+            }
+
+        prev_mst = prev_cand.get("MST")
+        prev_efyd = text(prev_cand.get("시행일자")) or ""
+        prev_res = client.call("eflaw", service=True, MST=prev_mst, efYd=prev_efyd, JO=jo_code)
+        if not prev_res.ok or not prev_res.partial:
+            return {
+                "law": final_law_name or law_name or str(law),
+                "MST": prev_mst,
+                "jo": jo,
+                "complete": False,
+                "why": "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다",
+                "구법": True,
+                "기준판_MST": prev_mst,
+                "기준판_시행일자": prev_efyd,
+            }
+
+        prev_root = prev_res.partial[0]
+        prev_law_dict = prev_root.get("법령") if isinstance(prev_root, dict) and "법령" in prev_root else prev_root
+        if not isinstance(prev_law_dict, dict):
+            return {
+                "law": final_law_name or law_name or str(law),
+                "MST": prev_mst,
+                "jo": jo,
+                "complete": False,
+                "why": "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다",
+                "구법": True,
+                "기준판_MST": prev_mst,
+                "기준판_시행일자": prev_efyd,
+            }
+
+        law_dict = prev_law_dict
+        mst = prev_mst
+        efyd = prev_efyd
+        base_mst = prev_mst
+        base_efyd = prev_efyd
+        is_historic = True
+        historic_guide = "폐지된 법이다. 폐지 직전 판의 조문이다"
+
+        info_dict = law_dict.get("기본정보", {})
+        final_law_name = text(info_dict.get("법령명_한글") or info_dict.get("법령명")) or law_name or str(law)
+        enforce_date = text(info_dict.get("시행일자")) or prev_efyd or ""
+
+        jo_root = law_dict.get("조문")
+        if not jo_root or not isinstance(jo_root, dict) or not jo_root.get("조문단위"):
+            return {
+                "law": final_law_name,
+                "MST": mst,
+                "jo": jo,
+                "complete": False,
+                "why": "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다",
+                "구법": True,
+                "기준판_MST": base_mst,
+                "기준판_시행일자": base_efyd,
+            }
+
+        raw_units = jo_root.get("조문단위")
+        units = raw_units if isinstance(raw_units, list) else [raw_units]
 
     # 조문단위 중 조문여부 == "조문" 이고 조문번호·조문가지번호가 요청과 같은 것만 고른다
     matched_units = []

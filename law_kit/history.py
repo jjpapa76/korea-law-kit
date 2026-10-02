@@ -128,20 +128,60 @@ def successor(name):
     hints = []
     # 타법폐지면 폐지한 법의 이름이 「」 없이 부칙 머리에 붙어 온다:
     # "부칙(국토의계획및이용에관한법률) <제6655호,2002.2.4>"
+    name_squashed = "".join(str(name).split())
     for pattern in (r"부칙\(([^)]{2,40}?(?:법|법률))\)",
                     r"「([^」]{4,40}?(?:법|법률))」"):
         for match in re.finditer(pattern, blob):
-            title = match.group(1)
-            if title != name and title not in hints:
+            title = match.group(1).strip()
+            if "".join(title.split()) != name_squashed and title not in hints:
                 hints.append(title)
-    if not hints:
+
+    # 부칙에서 후보를 못 찾은 경우: 연혁에서 동일 법령ID를 가진 제명변경 판 탐색 (예: 풍수해대책법 -> 자연재해대책법)
+    if not hints and last.get("ID"):
+        ef_list = client.call("eflaw", query=name, search=1, display=100)
+        if ef_list.ok:
+            for item in ef_list.partial:
+                if str(item.get("법령ID") or "") == str(last["ID"]):
+                    t = text(item.get("법령명한글"))
+                    if t and "".join(t.split()) != name_squashed:
+                        if t not in hints:
+                            hints.append(t)
+
+    # 후보 법령명을 띄어쓰기 있는 정식명으로 정규화
+    canonical_hints = []
+    for cand in hints:
+        squashed = "".join(cand.split())
+        official = None
+        # 현행 법령에서 정식명 찾기
+        cur = client.call("law", query=cand, search=1, display=10)
+        if cur.ok:
+            for item in cur.partial:
+                t = text(item.get("법령명한글"))
+                if t and "".join(t.split()) == squashed:
+                    official = t
+                    break
+        if not official:
+            # 연혁 법령에서 정식명 찾기
+            ef = client.call("eflaw", query=cand, search=1, display=10)
+            if ef.ok:
+                for item in ef.partial:
+                    t = text(item.get("법령명한글"))
+                    if t and "".join(t.split()) == squashed:
+                        official = t
+                        break
+        final_cand = official or cand
+        if final_cand not in canonical_hints:
+            canonical_hints.append(final_cand)
+
+    if not canonical_hints:
         # 후보를 못 뽑은 것은 "뒤를 이은 법이 없다" 가 아니다.
         return {"name": name, "status": "구법", "why": why,
                 "last_version": last, "candidates": [], "complete": False,
                 "note": "본문에서 승계 후보를 찾지 못했다 - 없다는 뜻이 아니다"}
     return {"name": name, "status": "구법", "why": why,
             "last_version": last,
-            "candidates": hints[:10],
+            "candidates": canonical_hints[:10],
+            "complete": True,
             "note": ("후보다. 단정이 아니다 - 법제처 API 에 승계 관계를 "
                      "직접 주는 칸이 없다. 사람이 확인해야 한다")}
 
