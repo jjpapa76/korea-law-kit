@@ -87,10 +87,28 @@ def find(name, limit=20, include_historic=True):
                 out.append(_entry(item, "alias"))
     if not out and include_historic:
         # 현행에 없다 = 폐지됐거나 제명이 바뀌었다. 구법 목록을 본다.
-        old = client.call(TARGET_HISTORIC, query=name, search=1, display=100)
-        if not old.complete:
-            failures.append("연혁 법령 조회: " + old.why_incomplete())
-        take(old, "historic")
+        # 필요한 만큼 쪽을 넘겨 받아라 (상한 5쪽, 그래도 끝을 못 보면 complete:false + why, 예외 금지)
+        historic_failures = []
+        for page in range(1, 6):
+            old = client.call(TARGET_HISTORIC, query=name, search=1, display=200, page=page)
+            if not old.ok:
+                historic_failures.append("연혁 법령 조회: " + (old.error or old.why_incomplete()))
+                break
+            take(old, "historic")
+            if out:
+                break
+            if not old.complete:
+                why_inc = old.why_incomplete()
+                if why_inc and why_inc not in historic_failures:
+                    historic_failures.append("연혁 법령 조회: " + why_inc)
+            try:
+                exp_total = int(old.total or 0)
+            except (ValueError, TypeError):
+                exp_total = None
+            if not old.partial or (exp_total is not None and page * 200 >= exp_total):
+                break
+        if not out and historic_failures:
+            failures.extend(historic_failures)
         for entry in out:
             entry["찾은방법"] = "historic"
     if not out and failures:

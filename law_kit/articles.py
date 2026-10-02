@@ -182,7 +182,19 @@ def _resolve_law_info(law):
             "efYd": "",
         }
 
-    hits = laws.find(s)
+    try:
+        hits = laws.find(s)
+    except Exception as exc:
+        if exc.__class__.__name__ == "Incomplete" or isinstance(exc, Incomplete):
+            return {
+                "mst": None,
+                "name": s,
+                "candidates": [],
+                "error": str(exc),
+                "is_historic": False,
+                "efYd": "",
+            }
+        raise
     if not hits:
         return {
             "mst": None,
@@ -495,6 +507,58 @@ def get_article(law, jo, hang=None):
         units = raw_units if isinstance(raw_units, list) else [raw_units]
 
     if not units:
+        # 폐지 판 판정은 "조문이 없는 응답" 이 아니라 그 판의 제개정구분(폐지·타법폐지)
+        # 또는 JO 없이 받은 그 판 본문에 조문이 하나도 없을 때로만 한다.
+        # 현행법·본문 있는 구법에서 그 조가 없으면 "조문 없음"(complete:true + 안내).
+        is_repealed_version = False
+        jg = ""
+        if isinstance(info_dict, dict):
+            jg = (info_dict.get("제개정구분") or info_dict.get("제개정구분명") or "").strip()
+        if not jg and isinstance(law_dict, dict):
+            jg = (law_dict.get("제개정구분") or law_dict.get("제개정구분명") or "").strip()
+
+        if jg in ("폐지", "타법폐지"):
+            is_repealed_version = True
+        elif is_historic:
+            # 연혁 목록에서도 이 판의 제개정구분을 확인
+            law_query_name = final_law_name or law_name or str(law)
+            v = history.versions(law_query_name)
+            rows = v.partial("versions") if hasattr(v, "partial") else dict.get(v, "versions") or []
+            for r in rows:
+                if str(r.get("MST") or "") == str(mst or ""):
+                    r_jg = (r.get("제개정") or "").strip()
+                    if r_jg in ("폐지", "타법폐지"):
+                        is_repealed_version = True
+                    break
+
+        if not is_repealed_version:
+            # 제개정구분이 폐지/타법폐지가 아니면, JO 없이 전체 본문을 조회하여
+            # 실제로 조문이 하나도 없는지(폐지 판인지) 검사한다.
+            if is_historic:
+                full_res = client.call("eflaw", service=True, MST=mst, efYd=efyd)
+            else:
+                full_res = client.call("law", service=True, MST=mst)
+            has_any_units = False
+            if full_res.ok and full_res.partial:
+                f_root = full_res.partial[0]
+                f_law = f_root.get("법령") if isinstance(f_root, dict) and "법령" in f_root else f_root
+                if isinstance(f_law, dict):
+                    f_jo_root = f_law.get("조문")
+                    if f_jo_root and isinstance(f_jo_root, dict) and f_jo_root.get("조문단위"):
+                        f_raw_units = f_jo_root.get("조문단위")
+                        f_units = f_raw_units if isinstance(f_raw_units, list) else [f_raw_units]
+                        if f_units:
+                            has_any_units = True
+
+            if has_any_units:
+                # JO 없이 조회한 본문에 조문이 있으므로 본문 있는 법(현행법 또는 구법)이다. 해당 조가 없으므로 "조문 없음".
+                return _make_no_jo_result()
+            else:
+                is_repealed_version = True
+
+        if not is_repealed_version:
+            return _make_no_jo_result()
+
         # 고른 판의 본문에 조문이 하나도 없으면(폐지 판) 절대 "조문 없음" 으로 내지 말고, 그 앞 판을 찾는다.
         # 앞 판을 못 찾으면 complete:false + why "폐지 판에는 본문이 없고, 그 앞 판을 찾지 못했다".
         law_query_name = final_law_name or law_name or str(law)
@@ -592,6 +656,20 @@ def get_article(law, jo, hang=None):
 
         jo_root = law_dict.get("조문")
         if not jo_root or not isinstance(jo_root, dict) or not jo_root.get("조문단위"):
+            # 앞 판에서도 해당 조문이 안 왔다면, 앞 판 본문 자체에 조문이 있는지 확인
+            # 앞 판 본문에 다른 조문이 있다면 "조문 없음"이고, 앞 판 본문에도 조문이 하나도 없다면 "그 앞 판을 찾지 못했다"
+            full_prev = client.call("eflaw", service=True, MST=prev_mst, efYd=prev_efyd)
+            has_prev_units = False
+            if full_prev.ok and full_prev.partial:
+                fp_root = full_prev.partial[0]
+                fp_law = fp_root.get("법령") if isinstance(fp_root, dict) and "법령" in fp_root else fp_root
+                if isinstance(fp_law, dict):
+                    fp_jo_root = fp_law.get("조문")
+                    if fp_jo_root and isinstance(fp_jo_root, dict) and fp_jo_root.get("조문단위"):
+                        has_prev_units = True
+            if has_prev_units:
+                return _make_no_jo_result()
+
             return {
                 "law": final_law_name,
                 "MST": mst,
