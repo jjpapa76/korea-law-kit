@@ -532,4 +532,109 @@ def test_mcp_server_law_search_offset_dispatch(monkeypatch):
     assert out["axes"]["ordin"]["next_offset"] == 40
 
 
+def test_one_zero_hit_three_or_more_words_fixture(monkeypatch):
+    """결함 (1) 시험: search.one 에서 낱말 3개 이상 0건 시 complete:false + why 안내 확인."""
+    def fake_call(target, query=None, **kwargs):
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. 판례 축 (prec) 3단어 이상 0건
+    q = "취득세 중과세 대상인 고급주택에 해당하는지 여부의 판단 기준"
+    res_prec = kit.search.one("prec", q)
+    assert res_prec["count"] == 0
+    assert res_prec["complete"] is False
+    expected_why = "모든 낱말이 들어간 결과가 0건이다. 없다고 단정하지 마라 - 낱말을 줄여 다시 물어라"
+    assert res_prec["why"] == expected_why
+    assert res_prec["note"] == expected_why
+    assert res_prec.get("안내") == expected_why
+
+    # 2. 법령 축 (law, search_mode=2) 3단어 이상 0건 (본문 및 법령명 둘 다 0건)
+    res_law = kit.search.one("law", q, search_mode=2)
+    assert res_law["count"] == 0
+    assert res_law["complete"] is False
+    assert res_law["why"] == expected_why
+    assert res_law["note"] == expected_why
+    assert res_law.get("안내") == expected_why
+
+
+def test_one_zero_hit_one_or_two_words_remains_complete_true(monkeypatch):
+    """결함 (1) 시험: search.one 에서 낱말 1~2개 0건은 complete:true, why '' 유지 확인."""
+    def fake_call(target, query=None, **kwargs):
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. 낱말 1개
+    res_1 = kit.search.one("prec", "취득세")
+    assert res_1["count"] == 0
+    assert res_1["complete"] is True
+    assert res_1["why"] == ""
+    assert res_1["note"] == ""
+
+    # 2. 낱말 2개
+    res_2 = kit.search.one("prec", "고급주택 판단")
+    assert res_2["count"] == 0
+    assert res_2["complete"] is True
+    assert res_2["why"] == ""
+    assert res_2["note"] == ""
+
+    # 3. 법령 축 낱말 1개
+    res_law_1 = kit.search.one("law", "취득세", search_mode=2)
+    assert res_law_1["count"] == 0
+    assert res_law_1["complete"] is True
+    assert res_law_1["why"] == ""
+
+    # 4. 법령 축 낱말 2개
+    res_law_2 = kit.search.one("law", "고급주택 판단", search_mode=2)
+    assert res_law_2["count"] == 0
+    assert res_law_2["complete"] is True
+    assert res_law_2["why"] == ""
+
+
+def test_across_law_body_zero_name_fallback_fixture(monkeypatch):
+    """결함 (2) 시험: search.across 법령 축 본문검색 0건인데 낱말별 법령명 검색으로 채운 결과 complete:false + why 확인."""
+    def fake_call(target, query=None, search=None, **kwargs):
+        s = str(search) if search is not None else ""
+        if target == "law":
+            if s == "1" and query == "BIM으로 설계된 건축물의 건축허가":
+                return Result("law", ok=True, complete=True, items=[], total=0)
+            if s == "2" and query == "BIM으로 설계된 건축물의 건축허가":
+                # 본문검색 0건
+                return Result("law", ok=True, complete=True, items=[], total=0)
+            if s == "1" and query in ("건축물", "건축"):
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "건축법", "법령구분명": "법률", "법령일련번호": "100"},
+                    {"법령명한글": "건축법 시행령", "법령구분명": "대통령령", "법령일련번호": "101"},
+                ], total=2)
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. search.one ("law", search_mode=2) 단독 호출 확인
+    res_one = kit.search.one("law", "BIM으로 설계된 건축물의 건축허가", search_mode=2)
+    assert res_one["count"] == 2
+    assert res_one["complete"] is False
+    expected_why = "본문검색은 0건이고, 낱말이 이름에 들어간 법을 대신 보였다 - 원래 검색어 전체를 만족하는지는 확인하지 않았다"
+    assert res_one["why"] == expected_why
+    assert res_one["note"] == expected_why
+    items_one = res_one.partial("items")
+    assert items_one[0]["제목"] == "건축법"
+
+    # 2. search.across 호출 확인
+    res_across = kit.search.across(
+        "BIM으로 설계된 건축물의 건축허가",
+        axes=[("law", "법령", True)],
+        display=20,
+    )
+    law_axis = res_across["axes"]["law"]
+    assert law_axis["count"] == 2
+    assert law_axis["complete"] is False
+    assert law_axis["why"] == expected_why
+    assert law_axis["note"] == expected_why
+    items_across = law_axis.partial("items")
+    assert items_across[0]["제목"] == "건축법"
+    assert "law" in res_across["incomplete"]
+
+
 
