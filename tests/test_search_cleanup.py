@@ -211,3 +211,131 @@ def test_law_search_plain_query_no_cleanup(monkeypatch):
     assert "검색어_정리" not in dispatched
     assert "검색어_정리" not in parsed
     assert "안내" not in parsed
+
+
+def test_strip_josa_and_extract_keywords():
+    """조사 떼기 (의 및 에 에서 을 를 은 는 이 가 와 과 등) 및 키워드 추출 검증."""
+    assert kit.search.strip_josa("건축물의") == "건축물"
+    assert kit.search.strip_josa("처리의") == "처리"
+    assert kit.search.strip_josa("행정처분의") == "행정처분"
+    assert kit.search.strip_josa("및") == ""
+    assert kit.search.strip_josa("도로에서") == "도로"
+    assert kit.search.strip_josa("기준으로") == "기준"
+    assert kit.search.strip_josa("의견청취") == "의견청취"
+
+    keywords = kit.search.extract_keywords("건축물의 대지 및 도로")
+    assert "건축물" in keywords
+    assert "대지" in keywords
+    assert "도로" in keywords
+    assert "및" not in keywords
+
+
+def test_case_search_zero_retry_and_guide(monkeypatch):
+    """시험: fixture(키 지우기)로 3단어 이상 0건 시 재검색 경로, 검색어_정리 및 축별 안내 검증."""
+    calls = []
+
+    def fake_call(target, query=None, display=20, search=None, **params):
+        calls.append((target, query, search))
+        if query == "통상임금 정기성 일률성 고정성 전원합의체":
+            # 첫 질의는 0건 반환 (법제처 AND 매칭 실패 모사)
+            return Result(target, ok=True, complete=True, items=[], total=0)
+        elif query == "통상임금 정기성 일률성":
+            # 줄인 검색어는 성공 결과 반환
+            mock_case = {
+                "판례일련번호": "1",
+                "사건명": "퇴직금",
+                "사건번호": "2012다89399",
+                "판결유형": "전원합의체 판결",
+                "법원명": "대법원",
+            }
+            return Result(target, ok=True, complete=True, items=[mock_case], total=1)
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. 재검색 성공 케이스
+    out = kit.search.across(
+        "통상임금 정기성 일률성 고정성 전원합의체",
+        axes=[("prec", "판례", False)],
+        display=20,
+    )
+    prec_axis = out["axes"]["prec"]
+    assert prec_axis["count"] == 1
+    assert prec_axis.get("검색어_정리") == "통상임금 정기성 일률성"
+    items = prec_axis.partial("items")
+    assert items[0]["raw"]["사건번호"] == "2012다89399"
+
+    # 2. 재검색 후에도 0건인 케이스 -> 안내 문구 확인
+    def fake_call_always_zero(target, query=None, display=20, search=None, **params):
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call_always_zero)
+
+    out_zero = kit.search.across(
+        "존재하지 않는 가상의 판례 낱말들",
+        axes=[("prec", "판례", False)],
+        display=20,
+    )
+    prec_zero = out_zero["axes"]["prec"]
+    assert prec_zero["count"] == 0
+    assert "검색어_정리" in prec_zero
+    assert "0건 - 낱말을 줄여 다시 물어라" in prec_zero.get("안내", "")
+    assert "모든 낱말이 들어간 결과가 없다는 뜻이다. 없다고 단정하지 마라" in prec_zero.get("안내", "")
+
+
+def test_statute_search_ranking_fixture(monkeypatch):
+    """시험: fixture(키 지우기)로 건축물의 대지 및 도로 -> 건축법 1위 및 주민등록번호 처리의 제한 -> 개인정보 보호법 상위 검증."""
+    def fake_call(target, query=None, display=20, search=None, **params):
+        s = str(search) if search is not None else ""
+        if target == "law":
+            if s == "2" and query == "건축물의 대지 및 도로":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "초고층 및 지하연계 복합건축물 재난관리에 관한 특별법", "법령구분명": "법률"},
+                    {"법령명한글": "건축법", "법령구분명": "법률"},
+                ], total=2)
+            if s == "1" and query in ("건축", "건축법"):
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "건축법", "법령구분명": "법률"},
+                    {"법령명한글": "건축법 시행령", "법령구분명": "대통령령"},
+                ], total=2)
+            if s == "2" and query == "주민등록번호 처리의 제한":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "평창올림픽 지원 등에 관한 특별법", "법령구분명": "법률"},
+                    {"법령명한글": "가족관계의 등록 등에 관한 법률", "법령구분명": "법률"},
+                    {"법령명한글": "개인정보 보호법", "법령구분명": "법률"},
+                ], total=3)
+            if s == "1" and query in ("주민등록", "주민등록법"):
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "주민등록법", "법령구분명": "법률"},
+                ], total=1)
+            if s == "2" and query == "행정처분의 사전통지 및 의견청취":
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "가축전염병 예방법 시행령", "법령구분명": "대통령령"},
+                    {"법령명한글": "국토의 계획 및 이용에 관한 법률 시행령", "법령구분명": "대통령령"},
+                ], total=2)
+            if s == "1" and query in ("행정", "행정처분", "행정절차법"):
+                return Result("law", ok=True, complete=True, items=[
+                    {"법령명한글": "행정절차법", "법령구분명": "법률"},
+                    {"법령명한글": "행정기본법", "법령구분명": "법률"},
+                ], total=2)
+        return Result(target, ok=True, complete=True, items=[], total=0)
+
+    monkeypatch.setattr(kit.client, "call", fake_call)
+
+    # 1. 건축물의 대지 및 도로 -> 건축법 1위
+    res1 = kit.search.one("law", "건축물의 대지 및 도로", display=20, search_mode=2)
+    items1 = res1.partial("items")
+    assert items1[0]["제목"] == "건축법"
+
+    # 2. 주민등록번호 처리의 제한 -> 개인정보 보호법 상위 5개 포함
+    res2 = kit.search.one("law", "주민등록번호 처리의 제한", display=20, search_mode=2)
+    items2 = res2.partial("items")
+    top_titles = [it["제목"] for it in items2[:5]]
+    assert "개인정보 보호법" in top_titles
+
+    # 3. 행정처분의 사전통지 및 의견청취 -> 행정절차법 상위 5개 포함
+    res3 = kit.search.one("law", "행정처분의 사전통지 및 의견청취", display=20, search_mode=2)
+    items3 = res3.partial("items")
+    top_titles3 = [it["제목"] for it in items3[:5]]
+    assert "행정절차법" in top_titles3
+

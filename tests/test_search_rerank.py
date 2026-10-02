@@ -87,7 +87,16 @@ def _get_sorted_fixture(fixture_items, query="건축물 용도변경 허가", wo
         indexed.sort(key=sort_key)
         return [r for _, r in indexed]
 
-    return sort_group(group1) + sort_group(group2) + sort_group(group3)
+    group2_laws = [r for r in group2 if kit.search._law_kind_rank(r["raw"]) >= 3]
+    group2_sub = [r for r in group2 if kit.search._law_kind_rank(r["raw"]) < 3]
+    group3_laws = [r for r in group3 if kit.search._law_kind_rank(r["raw"]) >= 3]
+    group3_sub = [r for r in group3 if kit.search._law_kind_rank(r["raw"]) < 3]
+
+    return (sort_group(group1) +
+            sort_group(group2_laws) +
+            sort_group(group3_laws) +
+            sort_group(group2_sub) +
+            sort_group(group3_sub))
 
 
 def test_fixture_rerank_order_and_total_preservation(monkeypatch):
